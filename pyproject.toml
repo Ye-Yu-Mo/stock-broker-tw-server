@@ -30,3 +30,18 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+exclude = ["vendor", "docs", "target", ".venv"]
+
+[tool.ruff.lint]
+# This project intentionally catches broad .NET/pythonnet interop exceptions
+# and uses Optional[...] for pythonnet compatibility clarity.
+extend-ignore = [
+    "BLE001",
+    "EXE001",
+    "PYI034",
+    "RUF100",
+    "S110",
+    "S112",
+    "SIM103",
+    "UP045",
+]

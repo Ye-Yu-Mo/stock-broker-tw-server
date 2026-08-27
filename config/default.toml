@@ -1,0 +1,13 @@
+# M1 CLI default configuration.
+# Values here can be overridden by CLI flags or environment variables.
+
+[yuanta]
+environment = "UAT"
+spark_api_dir = "vendor/yuanta/sparkapi"
+login_timeout = 15.0
+
+[account]
+account = "S98875005091"
+password = "1234"
+# pfx_path = "/absolute/path/to/your.pfx"   # macOS/Linux login requires this
+# pfx_pass = "yuanta"
