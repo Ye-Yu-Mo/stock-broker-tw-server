@@ -106,6 +106,8 @@ def to_dict(obj: Any) -> Any:
         return None
     if isinstance(obj, (str, int, float, bool)):
         return obj
+    if isinstance(obj, dict):
+        return {str(key): to_dict(value) for key, value in obj.items()}
     if isinstance(obj, (date, datetime)):
         return obj.isoformat()
 

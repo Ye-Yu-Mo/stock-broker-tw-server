@@ -1,13 +1,27 @@
-# M1 CLI default configuration.
-# Values here can be overridden by CLI flags or environment variables.
+# Default configuration for the broker server.
+# Values here can be overridden by environment variables (YUANTA_*) or .env.
+
+[server]
+host = "127.0.0.1"
+port = 8000
+# Leave empty to disable bearer-token authentication during local development.
+api_token = ""
+log_level = "INFO"
+log_json = true
 
 [yuanta]
 environment = "UAT"
 spark_api_dir = "vendor/yuanta/sparkapi"
 login_timeout = 15.0
+log_type = "COMMON"
+pmm_server_check = false
 
 [account]
 account = "S98875005091"
 password = "1234"
 # pfx_path = "/absolute/path/to/your.pfx"   # macOS/Linux login requires this
 # pfx_pass = "yuanta"
+
+[audit]
+enabled = true
+# file = "state/audit.jsonl"   # optional JSON-lines audit file

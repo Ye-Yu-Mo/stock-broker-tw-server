@@ -15,6 +15,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
+from stock_broker_tw.metrics import metrics
+
 T = TypeVar("T")
 
 _SENTINEL = object()
@@ -72,6 +74,7 @@ class EventQueue:
     def put(self, event: YuantaEvent) -> None:
         """Put an event into the queue. Safe to call from any thread."""
         self._queue.put(event)
+        metrics.event_queue_size.set(self.qsize())
         async_queue = self._async_queue
         if async_queue is not None and self._async_loop is not None:
             self._async_loop.call_soon_threadsafe(async_queue.put_nowait, event)
@@ -92,6 +95,7 @@ class EventQueue:
         item = self._queue.get(timeout=timeout)
         if item is _SENTINEL:
             raise queue.Empty
+        metrics.event_queue_size.set(self.qsize())
         return item  # type: ignore[return-value]
 
     def get_nowait(self) -> YuantaEvent:
@@ -99,6 +103,7 @@ class EventQueue:
         item = self._queue.get_nowait()
         if item is _SENTINEL:
             raise queue.Empty
+        metrics.event_queue_size.set(self.qsize())
         return item  # type: ignore[return-value]
 
     def get_event(self, timeout: float | None = None) -> YuantaEvent:

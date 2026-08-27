@@ -13,6 +13,9 @@ dependencies = [
     "prometheus-client>=0.20",
 ]
 
+[project.scripts]
+stock-broker-tw = "stock_broker_tw.main:run"
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
@@ -20,8 +23,15 @@ dev = [
     "ruff>=0.5",
 ]
 
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/stock_broker_tw"]
+
 [tool.uv]
-package = false
+package = true
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

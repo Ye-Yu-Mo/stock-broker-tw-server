@@ -84,6 +84,10 @@ class YuantaAdapter:
     def last_login_result(self) -> dict[str, Any] | None:
         return self._last_login_result
 
+    def reset_login_result(self) -> None:
+        """Clear the cached login result before a new login attempt."""
+        self._last_login_result = None
+
     def open(self) -> None:
         """Open the Yuanta API connection.
 

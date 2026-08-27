@@ -1,0 +1,235 @@
+"""Session service: login/logout/status orchestration for the Yuanta adapter."""
+
+from __future__ import annotations
+
+import asyncio
+import queue
+import uuid
+from typing import Any
+
+from pydantic import BaseModel
+
+from stock_broker_tw.audit import AuditLogger
+from stock_broker_tw.config import Settings
+from stock_broker_tw.metrics import metrics
+from stock_broker_tw.yuanta.adapter import YuantaAdapter, YuantaAdapterError
+from stock_broker_tw.yuanta.serializer import login_result_to_dict
+
+
+class SessionError(Exception):
+    """Raised when a session operation cannot be completed."""
+
+    def __init__(self, message: str, code: str = "SESSION_ERROR", status_code: int = 400) -> None:
+        super().__init__(message)
+        self.message = message
+        self.code = code
+        self.status_code = status_code
+
+
+class LoginCredentials(BaseModel):
+    """Credentials accepted by the session login endpoint."""
+
+    account: str | None = None
+    password: str | None = None
+    pfx_path: str | None = None
+    pfx_pass: str | None = None
+
+
+class SessionService:
+    """Own the session lifecycle on top of :class:`YuantaAdapter`."""
+
+    def __init__(
+        self,
+        adapter: YuantaAdapter,
+        settings: Settings,
+        audit: AuditLogger | None = None,
+    ) -> None:
+        self.adapter = adapter
+        self.settings = settings
+        self.audit = audit or AuditLogger(enabled=settings.audit.enabled, file_path=settings.audit.file)
+
+    async def login(
+        self,
+        credentials: LoginCredentials,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        request_id = request_id or str(uuid.uuid4())
+        account = credentials.account or self.settings.account.account
+        password = credentials.password or self.settings.account.password
+        pfx_path = credentials.pfx_path or self.settings.account.pfx_path
+        pfx_pass = credentials.pfx_pass or self.settings.account.pfx_pass
+
+        if not account or not password:
+            self.audit.record(
+                "session.login",
+                result="error",
+                request_id=request_id,
+                account=account,
+                error="missing account or password",
+            )
+            raise SessionError("account and password are required", code="INVALID_REQUEST", status_code=400)
+
+        metrics.login_attempts_total.labels(result="attempt").inc()
+        self.audit.record(
+            "session.login",
+            result="attempt",
+            request_id=request_id,
+            account=account,
+            method="pfx" if pfx_path else "password",
+        )
+
+        try:
+            self.adapter.open()
+            self._clear_login_result(self.adapter)
+            accepted = self.adapter.login(
+                account,
+                password,
+                pfx_path=pfx_path,
+                pfx_pass=pfx_pass,
+            )
+        except YuantaAdapterError as exc:
+            metrics.login_attempts_total.labels(result="error").inc()
+            self.audit.record(
+                "session.login",
+                result="error",
+                request_id=request_id,
+                account=account,
+                error=str(exc),
+            )
+            raise SessionError(
+                str(exc),
+                code="ADAPTER_ERROR",
+                status_code=409 if "already logged in" in str(exc) else 400,
+            ) from exc
+
+        if not accepted:
+            metrics.login_attempts_total.labels(result="error").inc()
+            self.audit.record(
+                "session.login",
+                result="error",
+                request_id=request_id,
+                account=account,
+                error="login request rejected by adapter",
+            )
+            raise SessionError("login request was rejected", code="LOGIN_REJECTED", status_code=502)
+
+        try:
+            result = await self._wait_for_login_result(self.adapter, self.settings.yuanta.login_timeout)
+        except TimeoutError as exc:
+            metrics.login_attempts_total.labels(result="timeout").inc()
+            self.audit.record(
+                "session.login",
+                result="timeout",
+                request_id=request_id,
+                account=account,
+            )
+            raise SessionError("timed out waiting for Login response", code="LOGIN_TIMEOUT", status_code=504) from exc
+
+        login_list = result.get("login_list") or []
+        if not login_list:
+            status = result.get("login_status") or {}
+            message = status.get("msg_content") or "login failed"
+            code = str(status.get("msg_code") or "LOGIN_FAILED")
+            metrics.login_attempts_total.labels(result="error").inc()
+            self.audit.record(
+                "session.login",
+                result="error",
+                request_id=request_id,
+                account=account,
+                error=message,
+                login_status=status,
+            )
+            raise SessionError(message, code=code, status_code=401)
+
+        metrics.login_attempts_total.labels(result="success").inc()
+        self.audit.record(
+            "session.login",
+            result="success",
+            request_id=request_id,
+            account=account,
+            login_list=login_list,
+        )
+        return result
+
+    async def logout(self, request_id: str | None = None) -> dict[str, Any]:
+        request_id = request_id or str(uuid.uuid4())
+        last_login = getattr(self.adapter, "last_login_result", None)
+        login_list = (last_login or {}).get("login_list") or []
+        account = login_list[0].get("account") if login_list else self.settings.account.account
+        try:
+            self.adapter.logout()
+        except YuantaAdapterError as exc:
+            metrics.logout_attempts_total.labels(result="error").inc()
+            self.audit.record(
+                "session.logout",
+                result="error",
+                request_id=request_id,
+                account=account,
+                error=str(exc),
+            )
+            raise SessionError(str(exc), code="ADAPTER_ERROR", status_code=400) from exc
+        self._clear_login_result(self.adapter)
+        metrics.logout_attempts_total.labels(result="success").inc()
+        self.audit.record(
+            "session.logout",
+            result="success",
+            request_id=request_id,
+            account=account,
+        )
+        return {"logged_in": False}
+
+    def status(self) -> dict[str, Any]:
+        adapter = self.adapter
+        event_queue = getattr(adapter, "event_queue", None)
+        return {
+            "opened": getattr(adapter, "opened", False),
+            "logged_in": getattr(adapter, "logged_in", False),
+            "disposed": getattr(adapter, "disposed", False),
+            "last_login_result": getattr(adapter, "last_login_result", None),
+            "event_queue_size": event_queue.qsize() if event_queue is not None else 0,
+        }
+
+    @staticmethod
+    def _clear_login_result(adapter: YuantaAdapter) -> None:
+        """Clear cached login result on adapters with or without a helper method."""
+        reset = getattr(adapter, "reset_login_result", None)
+        if callable(reset):
+            reset()
+            return
+        try:
+            adapter.last_login_result = None  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+    @staticmethod
+    async def _wait_for_login_result(adapter: YuantaAdapter, timeout: float) -> dict[str, Any]:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            last_login_result = getattr(adapter, "last_login_result", None)
+            if last_login_result is not None:
+                return last_login_result
+
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError(f"timed out after {timeout:.1f}s waiting for Login response")
+            try:
+                event = await asyncio.wait_for(
+                    adapter.event_queue.async_get(),
+                    timeout=min(0.1, remaining),
+                )
+            except (TimeoutError, queue.Empty):
+                continue
+
+            if event.str_index == "Login":
+                result = login_result_to_dict(event.obj_value)
+                # If the fake/test adapter does not populate last_login_result,
+                # consume the event directly and remember the result.
+                try:
+                    adapter.last_login_result = result  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                return result
+
+
+__all__ = ["LoginCredentials", "SessionError", "SessionService"]
