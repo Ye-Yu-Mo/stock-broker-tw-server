@@ -1,0 +1,86 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Rust (旧骨架，若后续删除 Cargo 相关文件可整段移除)
+/target
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+!vendor/**/*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# uv / virtualenv
+.venv/
+.uv/
+.uv-cache/
+venv/
+env/
+
+# Test / tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 环境变量 / 敏感配置
+.env
+.env.*
+!.env.example
+config/*.local.toml
+config/local.toml
+
+# 凭据与证书（请勿提交真实凭据）
+certs/**/*.p12
+certs/**/*.pfx
+certs/**/*.pem
+certs/**/*.key
+
+# 运行时状态 / 日志
+state/*
+!state/.gitkeep
+logs/
+*.log
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.jsonl
+
+# 临时文件
+*.tmp
+*.temp
