@@ -158,13 +158,16 @@ class Notifier:
                         max_retries=1,
                     )
                     card = (
-                        Card()
+                        Card(
+                            service="stock-broker-tw-server",
+                            node=str(fields.get("node") or "local"),
+                            timestamp=datetime.now(UTC).isoformat(),
+                            content=text,
+                        )
                         .severity(self._severity_for(event, fields))
                         .title(resolved_title)
                         .summary(text.splitlines()[0] if text else resolved_title)
-                        .service("stock-broker-tw-server")
                         .environment(str(fields.get("environment") or "unknown"))
-                        .timestamp(datetime.now(UTC).isoformat())
                         .details(text)
                     )
                     for key, value in fields.items():

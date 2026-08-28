@@ -289,8 +289,8 @@ wheels = [
 
 [[package]]
 name = "lark-alert"
-version = "0.1.0"
-source = { git = "https://github.com/Ye-Yu-Mo/lark_alert.git#cc79752c6d908b8aa928eff18ea81b07eac83bb6" }
+version = "0.2.0"
+source = { git = "https://github.com/Ye-Yu-Mo/lark_alert.git?rev=v0.2.0#0f30f733475ccece744242154fcbd1de5dbe3df2" }
 
 [[package]]
 name = "packaging"
@@ -627,7 +627,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
-    { name = "lark-alert", marker = "extra == 'lark'", git = "https://github.com/Ye-Yu-Mo/lark_alert.git" },
+    { name = "lark-alert", marker = "extra == 'lark'", git = "https://github.com/Ye-Yu-Mo/lark_alert.git?rev=v0.2.0" },
     { name = "prometheus-client", specifier = ">=0.20" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pydantic-settings", specifier = ">=2.3" },

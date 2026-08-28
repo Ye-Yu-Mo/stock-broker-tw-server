@@ -45,6 +45,50 @@ def test_notifier_uses_lark_alert_card_when_installed() -> None:
         def send_card(self, card):
             sent.append(card)
 
+    class FakeCard:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.data = {
+                "severity": None,
+                "title": None,
+                "summary": None,
+                "environment": None,
+                "details": None,
+                "fields": [],
+            }
+
+        def severity(self, value):
+            self.data["severity"] = value
+            return self
+
+        def title(self, value):
+            self.data["title"] = value
+            return self
+
+        def summary(self, value):
+            self.data["summary"] = value
+            return self
+
+        def environment(self, value):
+            self.data["environment"] = value
+            return self
+
+        def details(self, value):
+            self.data["details"] = value
+            return self
+
+        def field(self, key, value):
+            self.data["fields"].append((key, value))
+            return self
+
+        def to_json(self):
+            return json.dumps(
+                {
+                    "msg_type": "interactive",
+                    "card": {"header": {"template": "green"}},
+                }
+            )
+
     notifier = Notifier(
         enabled=True,
         webhook_url="https://example.com/hook",
@@ -52,13 +96,18 @@ def test_notifier_uses_lark_alert_card_when_installed() -> None:
         secret="s3cret",
         timeout=2.0,
     )
-    with mock.patch.object(lark_alert, "LarkAlert", FakeAlert):
+    with (
+        mock.patch.object(lark_alert, "LarkAlert", FakeAlert),
+        mock.patch.object(lark_alert, "Card", FakeCard),
+    ):
         assert notifier.send("order.status", "订单状态变化", {"client_order_id": "C001", "status": "FILLED"}) is True
     assert len(sent) == 1
     card = sent[0]
+    assert card.kwargs["service"] == "stock-broker-tw-server"
+    assert card.kwargs["node"] == "local"
+    assert card.data["title"] == "订单状态变化"
     data = json.loads(card.to_json())
     assert data["msg_type"] == "interactive"
-    assert data["card"]["header"]["template"] == "green"
 
 
 def test_notifier_unreachable_webhook_does_not_raise() -> None:
