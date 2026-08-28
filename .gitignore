@@ -84,3 +84,6 @@ logs/
 # 临时文件
 *.tmp
 *.temp
+
+# 本地敏感配置
+config
