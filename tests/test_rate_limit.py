@@ -25,3 +25,9 @@ def test_minute_limit_is_enforced() -> None:
     assert limiter.acquire("GetBankBalance") is True
     assert limiter.acquire("GetBankBalance") is True
     assert limiter.acquire("GetBankBalance") is False
+
+
+def test_none_limits_are_allowed() -> None:
+    limiter = RateLimiter(max_per_second=1, max_per_minute=None)
+    assert limiter.acquire("GetBankBalance") is True
+    assert limiter.acquire("GetBankBalance") is False

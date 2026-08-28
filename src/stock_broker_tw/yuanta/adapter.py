@@ -346,6 +346,183 @@ class YuantaAdapter:
                 return list(orders)
         return orders
 
+    def subscribe(
+        self,
+        function_name: str,
+        account: str,
+        symbols: Any,
+    ) -> bool:
+        """Submit a Yuanta subscription request.
+
+        The actual subscription events arrive through ``OnResponse``; this
+        method only verifies that the call was accepted.
+        """
+        return self._call_subscription(function_name, account, symbols)
+
+    def unsubscribe(
+        self,
+        function_name: str,
+        account: str,
+        symbols: Any,
+    ) -> bool:
+        """Submit a Yuanta unsubscription request."""
+        return self._call_subscription(function_name, account, symbols)
+
+    def _call_subscription(
+        self,
+        function_name: str,
+        account: str,
+        symbols: Any,
+    ) -> bool:
+        if self._trader is None:
+            raise YuantaAdapterError("trader is not available")
+        method = getattr(self._trader, function_name, None)
+        if not callable(method):
+            raise YuantaAdapterError(f"unknown Yuanta function: {function_name}")
+
+        payload = self._build_subscription_payload(function_name, symbols)
+        try:
+            accepted = method(account, payload)
+        except TypeError:
+            accepted = method(account, payload, 0)
+        except Exception as exc:
+            raise YuantaAdapterError(f"{function_name} call failed: {exc}") from exc
+        if not accepted:
+            raise YuantaAdapterError(f"{function_name} was rejected")
+        return True
+
+    @staticmethod
+    def _build_subscription_payload(function_name: str, symbols: Any) -> Any:
+        """Convert plain dicts to Yuanta .NET subscription objects when possible."""
+        if symbols is None:
+            symbols = []
+        if isinstance(symbols, dict):
+            symbols = [symbols]
+        elif hasattr(symbols, "to_dict") and callable(symbols.to_dict):
+            symbols = [symbols.to_dict()]
+        if not isinstance(symbols, (list, tuple)):
+            return symbols
+
+        stock_attr = {"market_type": "MarketType", "stk_code": "StockCode", "stock_code": "StockCode"}
+        class_map = {
+            "SubscribeWatchlist": ("Watchlist", {**stock_attr, "index_flag": "IndexFlag"}),
+            "UnSubscribeWatchlist": ("Watchlist", {**stock_attr, "index_flag": "IndexFlag"}),
+            "SubscribeWatchlistAll": ("WatchlistAll", stock_attr),
+            "UnSubscribeWatchlistAll": ("WatchlistAll", stock_attr),
+            "SubscribeFiveTickA": ("FiveTickA", stock_attr),
+            "UnSubscribeFiveTickA": ("FiveTickA", stock_attr),
+            "SubscribeStockTick": ("StockTick", stock_attr),
+            "UnSubscribeStockTick": ("StockTick", stock_attr),
+            "SubscribeMarketInformation": ("MarketInformation", stock_attr),
+            "UnSubscribeMarketInformation": ("MarketInformation", stock_attr),
+            "SubscribeStockInformation": ("StockOtherInformation", stock_attr),
+            "UnSubscribeStockInformation": ("StockOtherInformation", stock_attr),
+        }
+        mapping = class_map.get(function_name)
+        if mapping is None:
+            return list(symbols)
+
+        class_name, attr_map = mapping
+        try:
+            from System.Collections.Generic import List
+            from YuantaOneAPI import enumMarketType
+
+            module = __import__("YuantaOneAPI", fromlist=[class_name])
+            cls = getattr(module, class_name)
+            result = List[cls]()
+            for raw_item in symbols:
+                item = raw_item.to_dict() if hasattr(raw_item, "to_dict") else raw_item
+                obj = cls()
+                for key, value in item.items():
+                    attr = attr_map.get(str(key), str(key))
+                    if not hasattr(obj, attr):
+                        continue
+                    if attr == "MarketType" and isinstance(value, str):
+                        value = getattr(enumMarketType, value, value)
+                    if attr == "IndexFlag":
+                        try:
+                            from YuantaOneAPI import enumQuoteIndexType
+                            value = enumQuoteIndexType(value)
+                        except Exception:
+                            pass
+                    setattr(obj, attr, value)
+                result.Add(obj)
+            return result
+        except Exception:
+            return list(symbols)
+
+    @staticmethod
+    def _convert_query_object_params(function_name: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Convert object-list query params to .NET typed lists when possible.
+
+        ``GetWatchListAll`` expects ``List[Quote]`` and ``GetStockInformation``
+        expects ``List[StkInfo]``; plain dicts are not accepted by pythonnet.
+        """
+        result = dict(params)
+        object_params = {
+            "QuoteList": ("Quote", {"market_type": "MarketType", "stock_code": "StockCode"}),
+            "StkList": ("StkInfo", {"market_type": "MarketType", "stock_code": "StockCode"}),
+        }
+        for param_name, (class_name, attr_map) in object_params.items():
+            value = result.get(param_name)
+            if not isinstance(value, (list, tuple)):
+                continue
+            result[param_name] = YuantaAdapter._build_typed_object_list(
+                class_name, value, attr_map
+            )
+
+        # Convert common string/int parameters to the .NET enum types expected
+        # by the Yuanta API methods.
+        try:
+            from YuantaOneAPI import KLineType, enumMarketType, enumStkTickSelectType
+
+            market_type = result.get("MarketType")
+            if isinstance(market_type, str):
+                result["MarketType"] = getattr(
+                    enumMarketType, market_type, market_type
+                )
+
+            kline_type = result.get("KLineType")
+            if isinstance(kline_type, int):
+                result["KLineType"] = KLineType(kline_type)
+
+            select_type = result.get("SelectType")
+            if isinstance(select_type, int):
+                result["SelectType"] = enumStkTickSelectType(select_type)
+        except Exception:
+            # If the assembly is not loaded (e.g. unit tests), leave values as-is.
+            pass
+        return result
+
+    @staticmethod
+    def _build_typed_object_list(
+        class_name: str,
+        items: list[Any] | tuple[Any, ...],
+        attr_map: dict[str, str],
+    ) -> Any:
+        """Build a .NET ``List[T]`` from plain dicts; falls back to plain list."""
+        try:
+            from System.Collections.Generic import List
+            from YuantaOneAPI import enumMarketType
+
+            module = __import__("YuantaOneAPI", fromlist=[class_name])
+            cls = getattr(module, class_name)
+            result = List[cls]()
+            for raw_item in items:
+                item = raw_item.to_dict() if hasattr(raw_item, "to_dict") else raw_item
+                obj = cls()
+                for key, value in item.items():
+                    attr = attr_map.get(str(key), str(key))
+                    if not hasattr(obj, attr):
+                        continue
+                    if attr == "MarketType" and isinstance(value, str):
+                        value = getattr(enumMarketType, value, value)
+                    setattr(obj, attr, value)
+                result.Add(obj)
+            return result
+        except Exception:
+            return list(items)
+
     def query(
         self,
         function_name: str,
@@ -365,6 +542,7 @@ class YuantaAdapter:
         if not callable(method):
             raise YuantaAdapterError(f"unknown Yuanta function: {function_name}")
 
+        kwargs = self._convert_query_object_params(function_name, kwargs)
         try:
             accepted = method(*args, **kwargs) if args else method(**kwargs)
         except TypeError:

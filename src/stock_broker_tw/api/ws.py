@@ -13,6 +13,14 @@ from stock_broker_tw.yuanta.serializer import to_dict
 router = APIRouter()
 
 _REPORT_EVENT_TYPES = {"RR_RealReport", "RR_RealReportMerge"}
+_QUOTE_EVENT_TYPES = {
+    "SubscribeWatchlist",
+    "SubscribeWatchlistAll",
+    "SubscribeFiveTickA",
+    "SubscribeStockTick",
+    "SubscribeMarketInformation",
+    "SubscribeStockInformation",
+}
 
 
 class ConnectionManager:
@@ -70,6 +78,22 @@ class ConnectionManager:
                     await handle
             except Exception:
                 # Report processing must not kill the shared event consumer.
+                pass
+
+        # M5: keep the raw subscription event and also emit a unified
+        # ``quote.updated`` processed event for JSON-friendly clients.
+        if event.str_index in _QUOTE_EVENT_TYPES:
+            try:
+                await self.broadcast_json(
+                    {
+                        "type": "quote.updated",
+                        "source": event.str_index,
+                        "event": event.str_index,
+                        "data": to_dict(event.obj_value),
+                    }
+                )
+            except Exception:
+                # Quote event processing must not kill the shared consumer.
                 pass
 
     async def broadcast_json(self, payload: dict) -> None:

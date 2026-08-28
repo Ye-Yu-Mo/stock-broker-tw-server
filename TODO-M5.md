@@ -207,12 +207,12 @@
   - K 线日期格式错误。
 
 ## 验收标准
-- [ ] 能订阅并收到 `SubscribeWatchlist` / `SubscribeWatchlistAll` / `SubscribeFiveTickA` / `SubscribeStockTick` 等事件。
-- [ ] 能取消订阅，取消后不再收到对应推送。
-- [ ] 订阅数量超过上限时被拒绝并提示。
-- [ ] 行情查询接口能返回结构化数据。
-- [ ] WebSocket 客户端能同时收到行情与交易回报。
-- [ ] M1、M2、M3、M4 的单元测试全部通过。
+- [x] 能订阅并收到 `SubscribeWatchlist` / `SubscribeWatchlistAll` / `SubscribeFiveTickA` / `SubscribeStockTick` 等事件。
+- [x] 能取消订阅，取消后不再收到对应推送。
+- [x] 订阅数量超过上限时被拒绝并提示。
+- [x] 行情查询接口能返回结构化数据。
+- [x] WebSocket 客户端能同时收到行情与交易回报。
+- [x] M1、M2、M3、M4 的单元测试全部通过。
 
 ## 兼容性检查
 - 是否影响现有行为：不影响 M1 CLI、M2 会话、M3 只读、M4 交易接口。

@@ -170,6 +170,74 @@ def to_dict(obj: Any) -> Any:
     ):
         return order_trade_report_result_to_dict(obj)
 
+    # M5 quote subscription/query result wrappers.
+    if "watchlistresult" in name or (
+        hasattr(obj, "Key") and hasattr(obj, "IndexFlag") and hasattr(obj, "StkCode") and hasattr(obj, "Value")
+    ):
+        return watch_list_result_to_dict(obj)
+    if "watchlistallresult" in name or (
+        hasattr(obj, "Key") and hasattr(obj, "SeqNo") and hasattr(obj, "IndexFlag") and hasattr(obj, "StkCode")
+    ):
+        return watch_list_all_result_to_dict(obj)
+    if "fivetickaresult" in name or (
+        hasattr(obj, "Key") and hasattr(obj, "IndexFlag") and hasattr(obj, "StkCode") and hasattr(obj, "IndexFlag_50")
+    ):
+        return five_tick_a_result_to_dict(obj)
+    if "stocktickresult" in name or (
+        hasattr(obj, "SerialNo") and hasattr(obj, "DealVol") and hasattr(obj, "InOutFlag")
+    ):
+        return stock_tick_result_to_dict(obj)
+    if "marketinforesult" in name or (
+        hasattr(obj, "TickVol") and hasattr(obj, "TradeStatus") and hasattr(obj, "DealPrice")
+    ):
+        return market_info_result_to_dict(obj)
+    if "stockotherinforesult" in name or (
+        hasattr(obj, "IndexFlag") and hasattr(obj, "TradeTime") and hasattr(obj, "Key")
+    ):
+        return stock_other_info_result_to_dict(obj)
+    if "stkinformationresult" in name or hasattr(obj, "StockInformationList"):
+        return stk_information_result_to_dict(obj)
+    if "stickdetailresult" in name or hasattr(obj, "StickDetailList"):
+        return stick_detail_result_to_dict(obj)
+    if "stkclassifypriceresult" in name or hasattr(obj, "ClassifyPriceList"):
+        return stk_classify_price_result_to_dict(obj)
+    if "klineresult" in name or hasattr(obj, "KLineList"):
+        return k_line_result_to_dict(obj)
+    if "querywatchlistresult" in name or hasattr(obj, "QueryWatchList"):
+        return query_watch_list_result_to_dict(obj)
+    if "subquotelistresult" in name or (
+        hasattr(obj, "QuoteList") and hasattr(obj, "Account")
+    ):
+        return sub_quote_list_result_to_dict(obj)
+
+    # M5 quote row objects.
+    if "fivetick" in name or (
+        hasattr(obj, "BuyPrice1")
+        and hasattr(obj, "BuyVol1")
+        and hasattr(obj, "SellPrice1")
+    ):
+        return five_tick_a_flag_to_dict(obj)
+    if "stkinformation" in name or (
+        hasattr(obj, "Dayoffmark") and hasattr(obj, "Creditpercent")
+    ):
+        return stk_information_to_dict(obj)
+    if "stickdetail" in name or (
+        hasattr(obj, "TimeStamp") and hasattr(obj, "DealPrice") and hasattr(obj, "DealVol")
+    ):
+        return stick_detail_to_dict(obj)
+    if "classifyprice" in name or (
+        hasattr(obj, "InDealVol") and hasattr(obj, "OutDealVol")
+    ):
+        return classify_price_to_dict(obj)
+    if "kline" in name or (
+        hasattr(obj, "OpenPrice") and hasattr(obj, "ClosePrice") and hasattr(obj, "DealVol")
+    ):
+        return k_line_to_dict(obj)
+    if "querywatchlist" in name or (
+        hasattr(obj, "StkName") and hasattr(obj, "YstPrice") and hasattr(obj, "DealPrice")
+    ):
+        return query_watch_list_to_dict(obj)
+
     # M3 read-only query row objects.
     if "ovstkstore" in name or (hasattr(obj, "StkFullName") and hasattr(obj, "RateKind")):
         return ov_stk_store_to_dict(obj)
@@ -692,3 +760,337 @@ serialize_order_trade_report = order_trade_report_result_to_dict
 store_summary_to_dict = store_summary_result_to_dict
 unrealized_gain_loss_to_dict = unrealized_gain_loss_result_to_dict
 order_trade_report_to_dict = order_trade_report_result_to_dict
+
+# ---------------------------------------------------------------------------
+# M5 quote subscription / query serializers
+# ---------------------------------------------------------------------------
+
+
+def watch_list_result_to_dict(obj: Any) -> dict[str, Any]:
+    """Serialize a ``WatchListResult`` subscription event."""
+    return {
+        "key": _get_attr(obj, "Key"),
+        "market_type": _get_attr(obj, "MarketType"),
+        "stk_code": _get_attr(obj, "StkCode"),
+        "index_flag": _get_attr(obj, "IndexFlag"),
+        "value": _get_attr(obj, "Value"),
+    }
+
+
+def watch_list_all_flag_22_to_dict(obj: Any) -> dict[str, Any]:
+    return {"buy_vol": _get_attr(obj, "BuyVol"), "sell_vol": _get_attr(obj, "SellVol")}
+
+
+def watch_list_all_flag_28_to_dict(obj: Any) -> dict[str, Any]:
+    return {"buy_price": _get_attr(obj, "BuyPrice"), "sell_price": _get_attr(obj, "SellPrice")}
+
+
+def watch_list_all_flag_29_to_dict(obj: Any) -> dict[str, Any]:
+    return {
+        "time": to_dict(_get_attr(obj, "Time")),
+        "total_out_vol": _get_attr(obj, "TotalOutVol"),
+        "total_in_vol": _get_attr(obj, "TotalInVol"),
+        "deal": _get_attr(obj, "Deal"),
+        "vol": _get_attr(obj, "Vol"),
+        "total_vol": _get_attr(obj, "TotalVol"),
+        "total_amt": _get_attr(obj, "TotalAmt"),
+    }
+
+
+def watch_list_all_result_to_dict(obj: Any) -> dict[str, Any]:
+    """Serialize a ``WatchListAllResult`` subscription event."""
+    result = {
+        "key": _get_attr(obj, "Key"),
+        "market_type": _get_attr(obj, "MarketType"),
+        "stk_code": _get_attr(obj, "StkCode"),
+        "seq_no": _get_attr(obj, "SeqNo"),
+        "index_flag": _get_attr(obj, "IndexFlag"),
+        "value": _get_attr(obj, "Value"),
+    }
+    if _get_attr(obj, "IndexFlag_22") is not None:
+        result["index_flag_22"] = watch_list_all_flag_22_to_dict(_get_attr(obj, "IndexFlag_22"))
+    if _get_attr(obj, "IndexFlag_28") is not None:
+        result["index_flag_28"] = watch_list_all_flag_28_to_dict(_get_attr(obj, "IndexFlag_28"))
+    if _get_attr(obj, "IndexFlag_29") is not None:
+        result["index_flag_29"] = watch_list_all_flag_29_to_dict(_get_attr(obj, "IndexFlag_29"))
+    return result
+
+
+def five_tick_a_flag_to_dict(obj: Any) -> dict[str, Any]:
+    """Serialize a FiveTickA flag payload (20/21/42/43/50/51)."""
+    candidates = {
+        "price1": "Price1",
+        "price2": "Price2",
+        "price3": "Price3",
+        "price4": "Price4",
+        "price5": "Price5",
+        "vol1": "Vol1",
+        "vol2": "Vol2",
+        "vol3": "Vol3",
+        "vol4": "Vol4",
+        "vol5": "Vol5",
+        "buy_price1": "BuyPrice1",
+        "buy_price2": "BuyPrice2",
+        "buy_price3": "BuyPrice3",
+        "buy_price4": "BuyPrice4",
+        "buy_price5": "BuyPrice5",
+        "buy_vol1": "BuyVol1",
+        "buy_vol2": "BuyVol2",
+        "buy_vol3": "BuyVol3",
+        "buy_vol4": "BuyVol4",
+        "buy_vol5": "BuyVol5",
+        "sell_price1": "SellPrice1",
+        "sell_price2": "SellPrice2",
+        "sell_price3": "SellPrice3",
+        "sell_price4": "SellPrice4",
+        "sell_price5": "SellPrice5",
+        "sell_vol1": "SellVol1",
+        "sell_vol2": "SellVol2",
+        "sell_vol3": "SellVol3",
+        "sell_vol4": "SellVol4",
+        "sell_vol5": "SellVol5",
+    }
+    return {
+        key: _get_attr(obj, attr)
+        for key, attr in candidates.items()
+        if _get_attr(obj, attr) is not None
+    }
+
+
+def five_tick_a_result_to_dict(obj: Any) -> dict[str, Any]:
+    """Serialize a ``FiveTickAResult`` subscription event."""
+    result = {
+        "key": _get_attr(obj, "Key"),
+        "market_type": _get_attr(obj, "MarketType"),
+        "stk_code": _get_attr(obj, "StkCode"),
+        "index_flag": _get_attr(obj, "IndexFlag"),
+        "value": _get_attr(obj, "Value"),
+    }
+    for flag_name in ("IndexFlag_20", "IndexFlag_21", "IndexFlag_42", "IndexFlag_43", "IndexFlag_50", "IndexFlag_51"):
+        flag = _get_attr(obj, flag_name)
+        if flag is not None:
+            suffix = flag_name.split("_")[-1]
+            result[f"index_flag_{suffix}"] = five_tick_a_flag_to_dict(flag)
+    return result
+
+
+def stock_tick_result_to_dict(obj: Any) -> dict[str, Any]:
+    """Serialize a ``StockTickResult`` subscription event."""
+    return {
+        "key": _get_attr(obj, "Key"),
+        "market_type": _get_attr(obj, "MarketType"),
+        "stk_code": _get_attr(obj, "StkCode"),
+        "serial_no": _get_attr(obj, "SerialNo"),
+        "time": to_dict(_get_attr(obj, "Time")),
+        "buy_price": _get_attr(obj, "BuyPrice"),
+        "sell_price": _get_attr(obj, "SellPrice"),
+        "deal_price": _get_attr(obj, "DealPrice"),
+        "deal_vol": _get_attr(obj, "DealVol"),
+        "in_out_flag": _get_attr(obj, "InOutFlag"),
+        "type": _get_attr(obj, "Type"),
+    }
+
+
+def market_info_result_to_dict(obj: Any) -> dict[str, Any]:
+    """Serialize a ``MarketInfoResult`` subscription event."""
+    return {
+        "key": _get_attr(obj, "Key"),
+        "market_type": _get_attr(obj, "MarketType"),
+        "stk_code": _get_attr(obj, "StkCode"),
+        "deal_price": _get_attr(obj, "DealPrice"),
+        "tick_vol": _get_attr(obj, "TickVol"),
+        "time": to_dict(_get_attr(obj, "Time")),
+        "trade_status": _get_attr(obj, "TradeStatus"),
+    }
+
+
+def stock_other_info_result_to_dict(obj: Any) -> dict[str, Any]:
+    """Serialize a ``StockOtherInfoResult`` subscription event."""
+    return {
+        "key": _get_attr(obj, "Key"),
+        "market_type": _get_attr(obj, "MarketType"),
+        "stk_code": _get_attr(obj, "StkCode"),
+        "index_flag": _get_attr(obj, "IndexFlag"),
+        "trade_time": to_dict(_get_attr(obj, "TradeTime")),
+    }
+
+
+def stk_information_to_dict(obj: Any) -> dict[str, Any]:
+    """Serialize a ``StkInformation`` stock info row."""
+    return {
+        "market_no": _get_attr(obj, "MarketNo"),
+        "stock_code": _get_attr(obj, "StockCode"),
+        "dayoffmark": _get_attr(obj, "Dayoffmark"),
+        "creditpercent": _get_attr(obj, "Creditpercent"),
+        "lendpercent": _get_attr(obj, "Lendpercent"),
+        "creditremnants": _get_attr(obj, "Creditremnants"),
+        "lendremnants": _get_attr(obj, "Lendremnants"),
+        "lend_sell_mark": _get_attr(obj, "LendSellMark"),
+        "recall_date": _get_attr(obj, "RecallDate"),
+        "lend_qty": _get_attr(obj, "LendQty"),
+        "stock_warning": to_list(_get_attr(obj, "StockWarning")),
+        "update_date": _get_attr(obj, "UpdateDate"),
+    }
+
+
+def stk_information_result_to_dict(obj: Any) -> dict[str, Any]:
+    """Serialize a ``StkInformationResult`` query result."""
+    return {"stock_information_list": to_list(_get_attr(obj, "StockInformationList"))}
+
+
+def stick_detail_to_dict(obj: Any) -> dict[str, Any]:
+    """Serialize a ``StickDetail`` tick row."""
+    return {
+        "time_stamp": to_dict(_get_attr(obj, "TimeStamp")),
+        "deal_price": _get_attr(obj, "DealPrice"),
+        "deal_vol": _get_attr(obj, "DealVol"),
+        "buy_price": _get_attr(obj, "BuyPrice"),
+        "sell_price": _get_attr(obj, "SellPrice"),
+        "seq_no": _get_attr(obj, "SeqNo"),
+        "in_out_flag": _get_attr(obj, "InOutFlag"),
+    }
+
+
+def stick_detail_result_to_dict(obj: Any) -> dict[str, Any]:
+    """Serialize a ``StickDetailResult`` query result."""
+    return {
+        "market_no": _get_attr(obj, "MarketNo"),
+        "stock_code": _get_attr(obj, "StockCode"),
+        "stick_detail_list": to_list(_get_attr(obj, "StickDetailList")),
+    }
+
+
+def classify_price_to_dict(obj: Any) -> dict[str, Any]:
+    """Serialize a ``ClassifyPrice`` row."""
+    return {
+        "price": _get_attr(obj, "Price"),
+        "in_deal_vol": _get_attr(obj, "InDealVol"),
+        "out_deal_vol": _get_attr(obj, "OutDealVol"),
+        "total_deal_vol": _get_attr(obj, "TotalDealVol"),
+    }
+
+
+def stk_classify_price_result_to_dict(obj: Any) -> dict[str, Any]:
+    """Serialize a ``StkClassifyPriceResult`` query result."""
+    return {
+        "date": _get_attr(obj, "Date"),
+        "market_no": _get_attr(obj, "MarketNo"),
+        "stock_code": _get_attr(obj, "StockCode"),
+        "classify_price_list": to_list(_get_attr(obj, "ClassifyPriceList")),
+    }
+
+
+def k_line_to_dict(obj: Any) -> dict[str, Any]:
+    """Serialize a ``KLine`` row."""
+    return {
+        "time_stamp": to_dict(_get_attr(obj, "TimeStamp")),
+        "open_price": _get_attr(obj, "OpenPrice"),
+        "high_price": _get_attr(obj, "HighPrice"),
+        "low_price": _get_attr(obj, "LowPrice"),
+        "close_price": _get_attr(obj, "ClosePrice"),
+        "deal_vol": _get_attr(obj, "DealVol"),
+    }
+
+
+def k_line_result_to_dict(obj: Any) -> dict[str, Any]:
+    """Serialize a ``KLineResult`` query result."""
+    return {
+        "market_no": _get_attr(obj, "MarketNo"),
+        "stock_code": _get_attr(obj, "StockCode"),
+        "k_line_list": to_list(_get_attr(obj, "KLineList")),
+    }
+
+
+def query_watch_list_to_dict(obj: Any) -> dict[str, Any]:
+    """Serialize a ``QueryWatchList`` snapshot row."""
+    return {
+        "market_no": _get_attr(obj, "MarketNo"),
+        "stk_code": _get_attr(obj, "StkCode"),
+        "stk_name": _get_attr(obj, "StkName"),
+        "yst_price": _get_attr(obj, "YstPrice"),
+        "open_ref_price": _get_attr(obj, "OpenRefPrice"),
+        "up_stop_price": _get_attr(obj, "UpStopPrice"),
+        "down_stop_price": _get_attr(obj, "DownStopPrice"),
+        "yst_vol": _get_attr(obj, "YstVol"),
+        "ext_name": _get_attr(obj, "ExtName"),
+        "decimal": _get_attr(obj, "Decimal"),
+        "credit_percent": _get_attr(obj, "CreditPercent"),
+        "len_bond_percent": _get_attr(obj, "LenBondPercent"),
+        "open_price": _get_attr(obj, "OpenPrice"),
+        "high_price": _get_attr(obj, "HighPrice"),
+        "low_price": _get_attr(obj, "LowPrice"),
+        "buy_price": _get_attr(obj, "BuyPrice"),
+        "total_out_vol": _get_attr(obj, "TotalOutVol"),
+        "sell_price": _get_attr(obj, "SellPrice"),
+        "total_in_vol": _get_attr(obj, "TotalInVol"),
+        "deal_price": _get_attr(obj, "DealPrice"),
+        "total_deal_amt": _get_attr(obj, "TotalDealAmt"),
+        "vol_flag": _get_attr(obj, "VolFlag"),
+        "vol": _get_attr(obj, "Vol"),
+        "total_vol": _get_attr(obj, "TotalVol"),
+        "fixed_price_vol": _get_attr(obj, "FixedPriceVol"),
+        "reserve_vol": _get_attr(obj, "ReserveVol"),
+        "settlement_price": _get_attr(obj, "SettlementPrice"),
+        "hi_contract_price": _get_attr(obj, "HiContractPrice"),
+        "lo_contract_price": _get_attr(obj, "LoContractPrice"),
+        "order_buy_count": _get_attr(obj, "OrderBuyCount"),
+        "order_buy_qty": _get_attr(obj, "OrderBuyQty"),
+        "order_sell_count": _get_attr(obj, "OrderSellCount"),
+        "order_sell_qty": _get_attr(obj, "OrderSellQty"),
+        "deal_buy_count": _get_attr(obj, "DealBuyCount"),
+        "deal_sell_count": _get_attr(obj, "DealSellCount"),
+        "volatility": _get_attr(obj, "Volatility"),
+        "time": to_dict(_get_attr(obj, "Time")),
+        "time_diff": _get_attr(obj, "TimeDiff"),
+        "stk_type2": _get_attr(obj, "StkType2"),
+        "reserve_vol_diff": _get_attr(obj, "ReserveVolDiff"),
+        "belong_code": _get_attr(obj, "BelongCode"),
+        "industry_name": _get_attr(obj, "IndustryName"),
+        "principal_percent": _get_attr(obj, "PrincipalPercent"),
+        "up_down_day": _get_attr(obj, "UpDownDay"),
+        "bid_qty": _get_attr(obj, "BidQty"),
+        "ask_qty": _get_attr(obj, "AskQty"),
+        "price_trends": _get_attr(obj, "PriceTrends"),
+        "est_deal_price": _get_attr(obj, "EstDealPrice"),
+        "est_deal_vol": _get_attr(obj, "EstDealVol"),
+        "est_deal_vol_flag": _get_attr(obj, "EstDealVolFlag"),
+    }
+
+
+def query_watch_list_result_to_dict(obj: Any) -> dict[str, Any]:
+    """Serialize a ``QueryWatchListResult`` query result."""
+    return {"query_watch_list": to_list(_get_attr(obj, "QueryWatchList"))}
+
+
+def sub_quote_list_result_to_dict(obj: Any) -> dict[str, Any]:
+    """Serialize a ``SubQuoteListResult`` (GetQuoteList) result."""
+    return {
+        "account": _get_attr(obj, "Account"),
+        "quote_list": to_list(_get_attr(obj, "QuoteList")),
+    }
+
+
+# Friendly aliases.
+serialize_watch_list = watch_list_result_to_dict
+serialize_watch_list_all = watch_list_all_result_to_dict
+serialize_five_tick_a = five_tick_a_result_to_dict
+serialize_stock_tick = stock_tick_result_to_dict
+serialize_market_info = market_info_result_to_dict
+serialize_stock_other_info = stock_other_info_result_to_dict
+serialize_stk_information = stk_information_result_to_dict
+serialize_stick_detail = stick_detail_result_to_dict
+serialize_stk_classify_price = stk_classify_price_result_to_dict
+serialize_k_line = k_line_result_to_dict
+
+# Common short aliases used by callers/tests.
+watchlist_result_to_dict = watch_list_result_to_dict
+watchlist_all_result_to_dict = watch_list_all_result_to_dict
+fivetick_a_result_to_dict = five_tick_a_result_to_dict
+stocktick_result_to_dict = stock_tick_result_to_dict
+marketinfo_result_to_dict = market_info_result_to_dict
+stockotherinfo_result_to_dict = stock_other_info_result_to_dict
+stkinformation_result_to_dict = stk_information_result_to_dict
+stickdetail_result_to_dict = stick_detail_result_to_dict
+stkclassifyprice_result_to_dict = stk_classify_price_result_to_dict
+kline_result_to_dict = k_line_result_to_dict
+querywatchlist_result_to_dict = query_watch_list_result_to_dict

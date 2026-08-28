@@ -78,6 +78,15 @@ class QueryConfig(BaseModel):
     rate_limit_per_minute: int = 600
 
 
+class QuoteConfig(BaseModel):
+    """Quote subscription and query settings."""
+
+    timeout: float = 10.0
+    max_per_request: int = 200
+    max_total_subscriptions: int = 2000
+    rate_limit_per_second: int = 10
+
+
 class RiskConfig(BaseModel):
     """Trading risk controls."""
 
@@ -120,6 +129,12 @@ _LEGACY_ENV_MAP: dict[str, dict[str, str]] = {
         "timeout": "yuanta_query_timeout",
         "rate_limit_per_second": "yuanta_query_rate_limit_per_second",
         "rate_limit_per_minute": "yuanta_query_rate_limit_per_minute",
+    },
+    "quote": {
+        "timeout": "yuanta_quote_timeout",
+        "max_per_request": "yuanta_quote_max_per_request",
+        "max_total_subscriptions": "yuanta_quote_max_total_subscriptions",
+        "rate_limit_per_second": "yuanta_quote_rate_limit_per_second",
     },
     "risk": {
         "panic": "yuanta_risk_panic",
@@ -182,6 +197,7 @@ class Settings(BaseSettings):
     audit: AuditConfig = AuditConfig()
     state: StateConfig = StateConfig()
     query: QueryConfig = QueryConfig()
+    quote: QuoteConfig = QuoteConfig()
     risk: RiskConfig = RiskConfig()
 
     @classmethod

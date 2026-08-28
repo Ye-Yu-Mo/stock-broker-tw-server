@@ -47,9 +47,17 @@ class RateLimiter:
             while minute_window and minute_window[0] <= now - 60.0:
                 minute_window.popleft()
 
-            if self.max_per_second >= 0 and len(second_window) >= self.max_per_second:
+            if (
+                self.max_per_second is not None
+                and self.max_per_second >= 0
+                and len(second_window) >= self.max_per_second
+            ):
                 return False
-            if self.max_per_minute >= 0 and len(minute_window) >= self.max_per_minute:
+            if (
+                self.max_per_minute is not None
+                and self.max_per_minute >= 0
+                and len(minute_window) >= self.max_per_minute
+            ):
                 return False
 
             second_window.append(now)

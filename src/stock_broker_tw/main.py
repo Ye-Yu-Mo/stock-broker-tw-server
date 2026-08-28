@@ -20,6 +20,7 @@ from stock_broker_tw.engine.report_handler import ReportHandler
 from stock_broker_tw.metrics import metrics
 from stock_broker_tw.risk.rules import RiskEngine
 from stock_broker_tw.service.query import QueryService
+from stock_broker_tw.service.quote import QuoteService
 from stock_broker_tw.service.session import SessionService
 from stock_broker_tw.state.recovery import run_startup_recovery
 from stock_broker_tw.state.store import StateStore
@@ -50,6 +51,7 @@ def create_app(
     session_service = SessionService(adapter, settings, audit=audit)
     state_store = StateStore(settings.state.db_path)
     query_service = QueryService(adapter, settings, store=state_store, audit=audit)
+    quote_service = QuoteService(adapter, settings, store=state_store, audit=audit)
     ws_manager = ConnectionManager()
     risk_engine = RiskEngine(settings)
     order_queue = SerialOrderQueue()
@@ -83,6 +85,7 @@ def create_app(
     app.state.state_store = state_store
     app.state.store = state_store
     app.state.query_service = query_service
+    app.state.quote_service = quote_service
     app.state.ws_manager = ws_manager
     app.state.risk_engine = risk_engine
     app.state.order_queue = order_queue

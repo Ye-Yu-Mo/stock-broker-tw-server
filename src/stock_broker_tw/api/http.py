@@ -17,6 +17,7 @@ from stock_broker_tw.engine.state import OrderAction
 from stock_broker_tw.metrics import metrics, render_metrics
 from stock_broker_tw.risk.rules import RiskError
 from stock_broker_tw.service.query import QueryError, QueryService
+from stock_broker_tw.service.quote import QuoteService, QuoteServiceError
 from stock_broker_tw.service.session import LoginCredentials, SessionError, SessionService
 from stock_broker_tw.yuanta.adapter import YuantaAdapter
 
@@ -40,6 +41,16 @@ class StockOrderPayload(BaseModel):
     trade_date: str | None = None
     new_price: float | None = None
     new_quantity: int | None = None
+
+
+class QuoteSubscribePayload(BaseModel):
+    """HTTP body for quote subscribe/unsubscribe."""
+
+    type: str
+    symbols: list[str] = Field(default_factory=list)
+    account: str | None = None
+    market_type: str = "TWSE"
+    index_flag: int | None = None
 
 
 def get_settings(request: Request) -> Settings:
@@ -66,7 +77,22 @@ def get_broker_service(request: Request) -> BrokerService:
     return request.app.state.broker_service
 
 
+def get_quote_service(request: Request) -> QuoteService:
+    return request.app.state.quote_service
+
+
 def _raise_query_error(exc: QueryError) -> None:
+    raise HTTPException(
+        status_code=exc.status_code,
+        detail={
+            "code": exc.code,
+            "message": exc.message,
+            "detail": exc.detail,
+        },
+    ) from exc
+
+
+def _raise_quote_error(exc: QuoteServiceError) -> None:
     raise HTTPException(
         status_code=exc.status_code,
         detail={
@@ -306,6 +332,176 @@ async def reports_order_trade(
         return ok(
             await service.order_trade_reports(
                 notshow_cancel=notshow_cancel,
+                account=account,
+                request_id=request.headers.get("X-Request-ID"),
+            )
+        )
+    except QueryError as exc:
+        _raise_query_error(exc)
+
+
+@router.post("/api/v1/quotes/subscribe", dependencies=[Depends(require_token)])
+async def quotes_subscribe(request: Request, payload: QuoteSubscribePayload) -> dict[str, Any]:
+    service = get_quote_service(request)
+    try:
+        result = await service.subscribe(
+            payload.model_dump(),
+            request_id=request.headers.get("X-Request-ID"),
+        )
+    except QuoteServiceError as exc:
+        _raise_quote_error(exc)
+    return ok(result)
+
+
+@router.post("/api/v1/quotes/unsubscribe", dependencies=[Depends(require_token)])
+async def quotes_unsubscribe(request: Request, payload: QuoteSubscribePayload) -> dict[str, Any]:
+    service = get_quote_service(request)
+    try:
+        result = await service.unsubscribe(
+            payload.model_dump(),
+            request_id=request.headers.get("X-Request-ID"),
+        )
+    except QuoteServiceError as exc:
+        _raise_quote_error(exc)
+    return ok(result)
+
+
+@router.get("/api/v1/quotes/subscribed", dependencies=[Depends(require_token)])
+async def quotes_subscribed(
+    request: Request,
+    account: str | None = None,
+    type: str | None = None,
+    quote_type: str | None = None,
+) -> dict[str, Any]:
+    service = get_quote_service(request)
+    return ok(service.list_subscribed(account=account, quote_type=type or quote_type))
+
+
+@router.get("/api/v1/quotes/snapshot", dependencies=[Depends(require_token)])
+async def quotes_snapshot(
+    request: Request,
+    stk_code: str = "",
+    symbols: str = "",
+    market_type: str = "TWSE",
+    account: str | None = None,
+) -> dict[str, Any]:
+    service = get_query_service(request)
+    symbols_param = stk_code or symbols
+    if not symbols_param:
+        quote_service = get_quote_service(request)
+        symbols_param = ",".join(
+            item["symbol"] for item in quote_service.list_subscribed(account=account)
+        )
+    try:
+        return ok(
+            await service.watchlist_snapshot(
+                stk_code=symbols_param,
+                market_type=market_type,
+                account=account,
+                request_id=request.headers.get("X-Request-ID"),
+            )
+        )
+    except QueryError as exc:
+        _raise_query_error(exc)
+
+
+@router.get("/api/v1/quotes/ticks", dependencies=[Depends(require_token)])
+async def quotes_ticks(
+    request: Request,
+    stk_code: str = "",
+    market_type: str = "TWSE",
+    select_type: int = 1,
+    start_time: str = "",
+    end_time: str = "",
+    stime: str = "",
+    etime: str = "",
+    s_time: str = "",
+    e_time: str = "",
+    last_count: int = 20,
+    account: str | None = None,
+) -> dict[str, Any]:
+    service = get_query_service(request)
+    try:
+        return ok(
+            await service.stock_ticks(
+                stk_code=stk_code,
+                market_type=market_type,
+                select_type=select_type,
+                start_time=start_time or stime or s_time,
+                end_time=end_time or etime or e_time,
+                last_count=last_count,
+                account=account,
+                request_id=request.headers.get("X-Request-ID"),
+            )
+        )
+    except QueryError as exc:
+        _raise_query_error(exc)
+
+
+@router.get("/api/v1/quotes/classify-price", dependencies=[Depends(require_token)])
+async def quotes_classify_price(
+    request: Request,
+    stk_code: str = "",
+    market_type: str = "TWSE",
+    account: str | None = None,
+) -> dict[str, Any]:
+    service = get_query_service(request)
+    try:
+        return ok(
+            await service.classify_price(
+                stk_code=stk_code,
+                market_type=market_type,
+                account=account,
+                request_id=request.headers.get("X-Request-ID"),
+            )
+        )
+    except QueryError as exc:
+        _raise_query_error(exc)
+
+
+@router.get("/api/v1/quotes/kline", dependencies=[Depends(require_token)])
+async def quotes_kline(
+    request: Request,
+    stk_code: str = "",
+    kline_type: int = 11,
+    market_type: str = "TWSE",
+    start_date: str = "",
+    end_date: str = "",
+    s_date: str = "",
+    e_date: str = "",
+    account: str | None = None,
+) -> dict[str, Any]:
+    service = get_query_service(request)
+    try:
+        return ok(
+            await service.kline(
+                stk_code=stk_code,
+                kline_type=kline_type,
+                market_type=market_type,
+                start_date=start_date or s_date,
+                end_date=end_date or e_date,
+                account=account,
+                request_id=request.headers.get("X-Request-ID"),
+            )
+        )
+    except QueryError as exc:
+        _raise_query_error(exc)
+
+
+@router.get("/api/v1/stocks/info", dependencies=[Depends(require_token)])
+async def stocks_info(
+    request: Request,
+    stk_code: str = "",
+    symbols: str = "",
+    market_type: str = "TWSE",
+    account: str | None = None,
+) -> dict[str, Any]:
+    service = get_query_service(request)
+    try:
+        return ok(
+            await service.stock_info(
+                stk_code=stk_code or symbols,
+                market_type=market_type,
                 account=account,
                 request_id=request.headers.get("X-Request-ID"),
             )

@@ -119,12 +119,23 @@ class StateStore:
                     UNIQUE(report_type, order_no, trade_date)
                 );
 
+                CREATE TABLE IF NOT EXISTS quote_subscriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account TEXT NOT NULL,
+                    quote_type TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    market_type TEXT NOT NULL DEFAULT 'TWSE',
+                    created_at TEXT NOT NULL,
+                    UNIQUE(account, quote_type, symbol, market_type)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_orders_order_no ON orders(order_no);
                 CREATE INDEX IF NOT EXISTS idx_stock_orders_order_no ON stock_orders(order_no);
                 CREATE INDEX IF NOT EXISTS idx_stock_orders_status ON stock_orders(status);
                 CREATE INDEX IF NOT EXISTS idx_trades_order_no ON trades(order_no);
                 CREATE INDEX IF NOT EXISTS idx_reports_order_no ON reports(order_no);
                 CREATE INDEX IF NOT EXISTS idx_reports_type ON reports(report_type);
+                CREATE INDEX IF NOT EXISTS idx_quote_subscriptions_account ON quote_subscriptions(account);
                 """
             )
 
@@ -462,6 +473,117 @@ class StateStore:
         else:
             rows = self._fetchall("SELECT * FROM reports WHERE report_type = ? ORDER BY id", (report_type,))
         return [self._row_to_dict(row) for row in rows]
+
+    # -- quote subscriptions ----------------------------------------------
+
+    def save_quote_subscriptions(
+        self,
+        account: str,
+        quote_type: str,
+        symbols: Iterable[str] | str,
+        market_type: str = "TWSE",
+    ) -> None:
+        """Insert quote subscription rows, ignoring duplicates."""
+        if isinstance(symbols, str):
+            symbols = [symbols]
+        quote_type = str(quote_type)
+        for symbol in symbols:
+            if not symbol:
+                continue
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO quote_subscriptions
+                        (account, quote_type, symbol, market_type, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (account, quote_type, str(symbol), market_type, _now()),
+                )
+
+    def save_quote_subscription(
+        self,
+        account: str,
+        quote_type: str,
+        symbol: str,
+        market_type: str = "TWSE",
+    ) -> None:
+        """Insert one quote subscription row."""
+        self.save_quote_subscriptions(account, quote_type, [symbol], market_type)
+
+    def delete_quote_subscriptions(
+        self,
+        account: str,
+        quote_type: str,
+        symbols: Iterable[str] | str,
+        market_type: str = "TWSE",
+    ) -> None:
+        """Delete quote subscription rows for the given symbols."""
+        quote_type = str(quote_type)
+        if isinstance(symbols, str):
+            symbols = [symbols]
+        for symbol in symbols:
+            if not symbol:
+                continue
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    DELETE FROM quote_subscriptions
+                    WHERE account = ? AND quote_type = ? AND symbol = ? AND market_type = ?
+                    """,
+                    (account, quote_type, str(symbol), market_type),
+                )
+
+    def delete_quote_subscription(
+        self,
+        account: str,
+        quote_type: str,
+        symbol: str,
+        market_type: str = "TWSE",
+    ) -> None:
+        """Delete one quote subscription row."""
+        self.delete_quote_subscriptions(account, quote_type, [symbol], market_type)
+
+    def list_quote_subscriptions(
+        self,
+        account: str | None = None,
+        quote_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return quote subscriptions, optionally filtered by account/type."""
+        sql = "SELECT account, quote_type, symbol, market_type, created_at FROM quote_subscriptions"
+        conditions: list[str] = []
+        params: list[Any] = []
+        if account:
+            conditions.append("account = ?")
+            params.append(account)
+        if quote_type:
+            conditions.append("quote_type = ?")
+            params.append(str(quote_type))
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        sql += " ORDER BY id"
+        rows = self._fetchall(sql, tuple(params))
+        return [
+            {
+                "account": row["account"],
+                "type": row["quote_type"],
+                "symbol": row["symbol"],
+                "market_type": row["market_type"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    def get_quote_subscriptions(
+        self,
+        account: str | None = None,
+        quote_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Alias for :meth:`list_quote_subscriptions`."""
+        return self.list_quote_subscriptions(account=account, quote_type=quote_type)
+
+    def count_quote_subscriptions(self, account: str | None = None) -> int:
+        """Return the number of stored quote subscription rows."""
+        return len(self.list_quote_subscriptions(account=account))
 
     # -- helpers -----------------------------------------------------------
 

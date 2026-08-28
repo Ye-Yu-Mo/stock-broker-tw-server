@@ -190,6 +190,159 @@ class QueryService:
         )
         return data
 
+    # -- M5 quote query methods --------------------------------------------
+
+    async def quote_list(
+        self,
+        account: str | None = None,
+        request_id: str | None = None,
+    ) -> Any:
+        """Call GetQuoteList to read the broker-side subscribed quote list."""
+        acct = self._account(account)
+        return await self._query("GetQuoteList", request_id=request_id, Account=acct)
+
+    async def watchlist_snapshot(
+        self,
+        stk_code: str = "",
+        market_type: str = "TWSE",
+        account: str | None = None,
+        request_id: str | None = None,
+    ) -> Any:
+        acct = self._account(account)
+        quote_list = self._quote_list(stk_code, market_type)
+        data = await self._query(
+            "GetWatchListAll",
+            request_id=request_id,
+            Account=acct,
+            QuoteList=quote_list,
+        )
+        self.store.save_snapshot("quote_snapshot", data, account=acct)
+        return data
+
+    async def stock_info(
+        self,
+        stk_code: str = "",
+        market_type: str = "TWSE",
+        account: str | None = None,
+        request_id: str | None = None,
+    ) -> Any:
+        acct = self._account(account)
+        if not stk_code:
+            raise QueryError(
+                "stk_code is required",
+                code="INVALID_REQUEST",
+                status_code=400,
+                detail={"field": "stk_code"},
+            )
+        stk_list = self._quote_list(stk_code, market_type)
+        data = await self._query(
+            "GetStockInformation",
+            request_id=request_id,
+            Account=acct,
+            StkList=stk_list,
+        )
+        self.store.save_snapshot("stock_info", data, account=acct)
+        return data
+
+    async def stock_ticks(
+        self,
+        stk_code: str,
+        market_type: str = "TWSE",
+        select_type: int = 1,
+        start_time: str = "",
+        end_time: str = "",
+        last_count: int = 20,
+        account: str | None = None,
+        request_id: str | None = None,
+    ) -> Any:
+        acct = self._account(account)
+        if not stk_code:
+            raise QueryError(
+                "stk_code is required",
+                code="INVALID_REQUEST",
+                status_code=400,
+                detail={"field": "stk_code"},
+            )
+        data = await self._query(
+            "GetStkTickDetail",
+            request_id=request_id,
+            Account=acct,
+            MarketType=market_type,
+            StkCode=stk_code,
+            SelectType=select_type,
+            Stime=start_time,
+            Etime=end_time,
+            LastCount=last_count,
+        )
+        self.store.save_snapshot("stock_ticks", data, account=acct)
+        return data
+
+    async def classify_price(
+        self,
+        stk_code: str,
+        market_type: str = "TWSE",
+        account: str | None = None,
+        request_id: str | None = None,
+    ) -> Any:
+        acct = self._account(account)
+        if not stk_code:
+            raise QueryError(
+                "stk_code is required",
+                code="INVALID_REQUEST",
+                status_code=400,
+                detail={"field": "stk_code"},
+            )
+        data = await self._query(
+            "GetStkClassifyPrice",
+            request_id=request_id,
+            Account=acct,
+            MarketType=market_type,
+            StkCode=stk_code,
+        )
+        self.store.save_snapshot("classify_price", data, account=acct)
+        return data
+
+    async def kline(
+        self,
+        stk_code: str,
+        kline_type: int = 11,
+        market_type: str = "TWSE",
+        start_date: str = "",
+        end_date: str = "",
+        account: str | None = None,
+        request_id: str | None = None,
+    ) -> Any:
+        acct = self._account(account)
+        if not stk_code:
+            raise QueryError(
+                "stk_code is required",
+                code="INVALID_REQUEST",
+                status_code=400,
+                detail={"field": "stk_code"},
+            )
+        start_date = self.validate_date(start_date, "start_date")
+        end_date = self.validate_date(end_date, "end_date")
+        data = await self._query(
+            "GetKLine",
+            request_id=request_id,
+            Account=acct,
+            KLineType=kline_type,
+            MarketType=market_type,
+            StkCode=stk_code,
+            SDate=start_date,
+            EDate=end_date,
+        )
+        self.store.save_snapshot("kline", data, account=acct)
+        return data
+
+    @staticmethod
+    def _quote_list(stk_code: str, market_type: str) -> list[dict[str, Any]]:
+        symbols = [s.strip() for s in stk_code.split(",") if s.strip()]
+        return [
+            {"market_type": market_type.upper(), "stock_code": symbol}
+            for symbol in symbols
+        ]
+
     # -- convenience aliases ----------------------------------------------
 
     get_positions = positions
@@ -210,6 +363,14 @@ class QueryService:
     get_order_trade_reports = order_trade_reports
     get_order_trade_report = order_trade_reports
     order_trade_report = order_trade_reports
+    get_quote_list = quote_list
+    snapshot = watchlist_snapshot
+    get_watchlist_snapshot = watchlist_snapshot
+    ticks = stock_ticks
+    get_stock_ticks = stock_ticks
+    get_stock_info = stock_info
+    get_classify_price = classify_price
+    get_kline = kline
 
     # -- helpers -----------------------------------------------------------
 

@@ -19,8 +19,8 @@ pmm_server_check = false
 [account]
 account = "S98875005091"
 password = "1234"
-# pfx_path = "/absolute/path/to/your.pfx"   # macOS/Linux login requires this
-# pfx_pass = "yuanta"
+pfx_path = "/absolute/path/to/your.pfx"   # macOS/Linux login requires this
+pfx_pass = "yuanta"
 
 [audit]
 enabled = true
