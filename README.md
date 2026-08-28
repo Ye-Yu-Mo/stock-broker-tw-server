@@ -9,7 +9,7 @@ uv sync
 uv run stock-broker-tw
 ```
 
-详细部署步骤见 [docs/deploy.md](docs/deploy.md)，UAT 联调清单见 [docs/uat-checklist.md](docs/uat-checklist.md)。
+详细部署步骤见 [docs/deploy.md](docs/deploy.md)，UAT 联调清单见 [docs/uat-checklist.md](docs/uat-checklist.md)，客户端接口文档见 [docs/client-api.md](docs/client-api.md)。
 
 ## 主要能力
 
