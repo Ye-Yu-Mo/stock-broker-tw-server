@@ -101,6 +101,7 @@ curl http://127.0.0.1:8000/health
 | [元大 API 整理](docs/api.md) | 元大 SPARK API 功能整理 |
 | [设计文档](DESIGN.md) | 系统设计 |
 | [开发计划](PLAN.md) | 里程碑计划 |
+| [更新日志](CHANGELOG.md) | 版本变更记录 |
 | [TODO-M1](TODO-M1.md) ~ [TODO-M6](TODO-M6.md) | 各里程碑任务清单 |
 
 ## 测试
