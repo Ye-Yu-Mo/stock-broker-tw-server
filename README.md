@@ -65,6 +65,12 @@ vendor/yuanta/sparkapi/
 uv sync
 ```
 
+如需使用 `lark_alert` 飞书通知库：
+
+```bash
+uv sync --extra lark
+```
+
 ### 3. 配置
 
 复制默认配置：

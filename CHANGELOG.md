@@ -104,6 +104,7 @@
   - `POST /api/v1/recovery/{client_order_id}/resolve`
 - 新增 `src/stock_broker_tw/notify.py`：Webhook 通知模块
 - 支持通用 JSON / 飞书 / 钉钉 / 企业微信 Webhook
+- 接入 `lark_alert` 飞书通知库（可选依赖：`uv sync --extra lark`），未安装时自动回退内置 Webhook
 - 支持按事件配置报警标题与消息模板
 - 修复同一委托多笔成交被覆盖的问题
 - 修复 watchlist 订阅 `index_flag` 无法区分的问题

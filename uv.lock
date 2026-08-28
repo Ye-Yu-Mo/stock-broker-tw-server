@@ -288,6 +288,11 @@ wheels = [
 ]
 
 [[package]]
+name = "lark-alert"
+version = "0.1.0"
+source = { git = "https://github.com/Ye-Yu-Mo/lark_alert.git#cc79752c6d908b8aa928eff18ea81b07eac83bb6" }
+
+[[package]]
 name = "packaging"
 version = "26.3"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
@@ -607,6 +612,11 @@ dependencies = [
     { name = "uvicorn", extra = ["standard"] },
 ]
 
+[package.optional-dependencies]
+lark = [
+    { name = "lark-alert" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "httpx" },
@@ -617,12 +627,14 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "lark-alert", marker = "extra == 'lark'", git = "https://github.com/Ye-Yu-Mo/lark_alert.git" },
     { name = "prometheus-client", specifier = ">=0.20" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pydantic-settings", specifier = ">=2.3" },
     { name = "pythonnet", specifier = ">=3.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
+provides-extras = ["lark"]
 
 [package.metadata.requires-dev]
 dev = [

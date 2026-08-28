@@ -113,6 +113,7 @@ class NotifyConfig(BaseModel):
     enabled: bool = False
     webhook_url: str = ""
     webhook_type: str = "generic"
+    secret: str = ""
     timeout: float = 3.0
     events: dict[str, NotifyEventConfig] = {}
 
@@ -181,6 +182,7 @@ _LEGACY_ENV_MAP: dict[str, dict[str, str]] = {
         "enabled": "yuanta_notify_enabled",
         "webhook_url": "yuanta_notify_webhook_url",
         "webhook_type": "yuanta_notify_webhook_type",
+        "secret": "yuanta_notify_secret",
         "timeout": "yuanta_notify_timeout",
     },
     "risk": {

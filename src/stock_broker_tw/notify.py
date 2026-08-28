@@ -81,15 +81,18 @@ class Notifier:
         enabled: bool = True,
         webhook_url: str = "",
         webhook_type: str = "generic",
+        secret: str | None = None,
         timeout: float = 3.0,
         config: Any = None,
         events: dict[str, Any] | None = None,
     ) -> None:
         self.events: dict[str, Any] = dict(events or {})
+        self.secret = secret
         if config is not None:
             enabled = bool(getattr(config, "enabled", enabled))
             webhook_url = getattr(config, "webhook_url", webhook_url) or ""
             webhook_type = getattr(config, "webhook_type", webhook_type) or webhook_type
+            secret = getattr(config, "secret", None) or secret
             timeout = float(getattr(config, "timeout", timeout))
             configured_events = getattr(config, "events", None)
             if configured_events:
@@ -97,6 +100,7 @@ class Notifier:
         self.enabled = bool(enabled and webhook_url)
         self.webhook_url = webhook_url
         self.webhook_type = webhook_type or "generic"
+        self.secret = secret or None
         self.timeout = timeout
 
     def _resolve(self, event: str, title: str, fields: dict[str, Any]) -> tuple[str, str]:
@@ -124,6 +128,26 @@ class Notifier:
         if not text:
             # Event is explicitly disabled in configuration.
             return False
+
+        if self.webhook_type.lower() in {"feishu", "lark"}:
+            try:
+                from lark_alert import LarkAlert
+            except Exception:  # noqa: BLE001 - optional dependency fallback
+                logger.debug("lark_alert is not installed; falling back to built-in webhook sender")
+            else:
+                try:
+                    alert = LarkAlert(
+                        self.webhook_url,
+                        secret=self.secret,
+                        timeout_secs=self.timeout,
+                        max_retries=1,
+                    )
+                    alert.send_text(text)
+                    return True
+                except Exception as exc:  # noqa: BLE001 - notification must be best-effort
+                    logger.warning("notify lark_alert failed: %s", exc)
+                    return False
+
         payload = build_payload(event, resolved_title, fields, self.webhook_type, text=text)
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(

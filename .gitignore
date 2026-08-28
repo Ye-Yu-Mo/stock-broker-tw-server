@@ -89,3 +89,4 @@ logs/
 config
 # 第三方 SDK（请自行下载放置，不随仓库分发）
 vendor/
+.cargo-home

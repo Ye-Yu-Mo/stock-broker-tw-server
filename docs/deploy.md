@@ -15,6 +15,12 @@
 uv sync
 ```
 
+如需使用 `lark_alert` 飞书通知库：
+
+```bash
+uv sync --extra lark
+```
+
 如需更新锁定文件：
 
 ```bash
