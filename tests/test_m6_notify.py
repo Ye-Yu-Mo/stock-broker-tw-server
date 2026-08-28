@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from unittest import mock
 
+import pytest
+
 from stock_broker_tw.notify import Notifier, format_message
 
 
@@ -33,7 +35,7 @@ def test_notifier_posts_webhook_payload() -> None:
 
 
 def test_notifier_uses_lark_alert_card_when_installed() -> None:
-    import lark_alert
+    lark_alert = pytest.importorskip("lark_alert")
 
     sent = []
 
