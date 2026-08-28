@@ -99,6 +99,14 @@ class RateLimitConfig(BaseModel):
     trade_max_batch: int = 30
 
 
+class NotifyEventConfig(BaseModel):
+    """Per-event webhook alert settings."""
+
+    enabled: bool = True
+    title: str | None = None
+    template: str | None = None
+
+
 class NotifyConfig(BaseModel):
     """Webhook notification settings."""
 
@@ -106,6 +114,7 @@ class NotifyConfig(BaseModel):
     webhook_url: str = ""
     webhook_type: str = "generic"
     timeout: float = 3.0
+    events: dict[str, NotifyEventConfig] = {}
 
 
 class RiskConfig(BaseModel):

@@ -84,6 +84,16 @@ enabled = false
 webhook_url = ""
 webhook_type = "feishu"   # generic / feishu / dingtalk / wecom
 timeout = 3.0
+
+# 可配置的报警事件：enabled 控制是否推送，title 覆盖默认标题，template 支持 {字段名} 占位。
+[notify.events]
+"risk.rejected" = { enabled = true, title = "风控拒绝", template = "[风控拒绝] {client_order_id} {action} {code} {message}" }
+"order.status" = { enabled = true, title = "订单状态变化", template = "[订单状态变化] {client_order_id} -> {status} {order_no}" }
+"order.broker_error" = { enabled = true, title = "委托发送异常", template = "[委托异常] {client_order_id} {error}" }
+"risk.panic" = { enabled = true, title = "Panic 变化", template = "[Panic] old={old} new={panic}" }
+"circuit.opened" = { enabled = true, title = "熔断开启", template = "[熔断开启] {name} {error}" }
+"circuit.closed" = { enabled = true, title = "熔断恢复", template = "[熔断恢复] {name}" }
+"recovery.error" = { enabled = true, title = "启动恢复异常", template = "[恢复异常] {error}" }
 ```
 
 也可以通过环境变量覆盖：
