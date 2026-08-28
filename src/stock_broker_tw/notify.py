@@ -139,7 +139,7 @@ class Notifier:
                     alert = LarkAlert(
                         self.webhook_url,
                         secret=self.secret,
-                        timeout_secs=self.timeout,
+                        timeout_secs=int(self.timeout),
                         max_retries=1,
                     )
                     alert.send_text(text)
