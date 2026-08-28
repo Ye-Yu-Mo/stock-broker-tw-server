@@ -7,6 +7,8 @@
 - macOS / Linux（元大 Spark API 通常提供 macOS/Linux .NET 绑定）
 - 元大 Spark API 目录：`vendor/yuanta/sparkapi`
 
+> 第三方 Spark API SDK **不随仓库分发**。请向元大营业部申请后，将解压内容放到 `vendor/yuanta/sparkapi/`。
+
 ## 1. 安装依赖
 
 ```bash

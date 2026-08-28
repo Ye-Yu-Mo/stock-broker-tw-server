@@ -1,9 +1,37 @@
 [project]
 name = "stock-broker-tw-server"
 version = "0.1.0"
-description = "Yuanta Spark API broker server (domestic stock, single account)"
-readme = "DESIGN.md"
+description = "Yuanta Spark API broker server for Taiwan domestic stocks (single account)"
+readme = "README.md"
 requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Ye-Yu-Mo" },
+]
+keywords = [
+    "yuanta",
+    "spark-api",
+    "broker",
+    "taiwan-stock",
+    "twse",
+    "trading",
+    "fastapi",
+    "quant",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: Chinese (Traditional)",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
@@ -12,6 +40,11 @@ dependencies = [
     "pythonnet>=3.0",
     "prometheus-client>=0.20",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Ye-Yu-Mo/stock-broker-tw-server"
+Repository = "https://github.com/Ye-Yu-Mo/stock-broker-tw-server"
+Documentation = "https://github.com/Ye-Yu-Mo/stock-broker-tw-server/blob/main/README.md"
 
 [project.scripts]
 stock-broker-tw = "stock_broker_tw.main:run"
