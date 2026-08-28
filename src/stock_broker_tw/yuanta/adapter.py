@@ -7,11 +7,13 @@ should use this class instead of touching pythonnet directly.
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any, Self
 
 from stock_broker_tw.yuanta import loader
 from stock_broker_tw.yuanta.events import EventQueue, YuantaEvent
-from stock_broker_tw.yuanta.serializer import login_result_to_dict
+from stock_broker_tw.yuanta.serializer import login_result_to_dict, to_dict
 
 
 class YuantaAdapterError(RuntimeError):
@@ -59,6 +61,8 @@ class YuantaAdapter:
         self._closed = False
         self._disposed = False
         self._last_login_result: dict[str, Any] | None = None
+        self._query_responses: dict[str, list[Any]] = {}
+        self._query_cond = threading.Condition()
 
     @property
     def trader(self) -> Any:
@@ -245,6 +249,70 @@ class YuantaAdapter:
                     self._logged_in = False
             except Exception:
                 pass
+
+        # Query responses are stored separately so ``query()`` does not steal
+        # unrelated events from the shared WebSocket/event queue.
+        if int_mark == 1 and str_index != "Login":
+            try:
+                data = to_dict(obj_value)
+            except Exception:
+                data = None
+            if data is not None:
+                with self._query_cond:
+                    self._query_responses.setdefault(str_index, []).append(data)
+                    self._query_cond.notify_all()
+
+    def query(
+        self,
+        function_name: str,
+        *args: Any,
+        request_id: str | None = None,
+        timeout: float = 10.0,
+        **kwargs: Any,
+    ) -> Any:
+        """Call a Yuanta query function and wait for its ``OnResponse``.
+
+        Parameters are forwarded to the .NET trader method.  The matching
+        response is serialized to plain dict/list via :mod:`serializer`.
+        """
+        if self._trader is None:
+            raise YuantaAdapterError("trader is not available")
+        method = getattr(self._trader, function_name, None)
+        if not callable(method):
+            raise YuantaAdapterError(f"unknown Yuanta function: {function_name}")
+
+        try:
+            accepted = method(*args, **kwargs) if args else method(**kwargs)
+        except TypeError:
+            # Some pythonnet bindings do not accept keyword arguments.  If the
+            # caller supplied only kwargs, retry positionally in declaration
+            # order (the service layer preserves the documented order).
+            if not args and kwargs:
+                accepted = method(*kwargs.values())
+            else:
+                raise
+        except Exception as exc:
+            raise YuantaAdapterError(
+                f"query {function_name} call failed: {exc}"
+            ) from exc
+        if not accepted:
+            raise YuantaAdapterError(f"query {function_name} was rejected")
+
+        deadline = time.monotonic() + timeout
+        with self._query_cond:
+            while True:
+                responses = self._query_responses.get(function_name)
+                if responses:
+                    return responses.pop(0)
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    request_suffix = f" request_id={request_id}" if request_id else ""
+                    raise TimeoutError(
+                        f"timed out after {timeout:.1f}s waiting for {function_name} "
+                        f"response{request_suffix}"
+                    )
+                self._query_cond.wait(remaining)
 
     def __enter__(self) -> Self:
         self.open()

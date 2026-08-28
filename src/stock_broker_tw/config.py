@@ -64,6 +64,20 @@ class AuditConfig(BaseModel):
     file: str | None = None
 
 
+class StateConfig(BaseModel):
+    """Local SQLite state storage settings."""
+
+    db_path: str = "state/yuanta.db"
+
+
+class QueryConfig(BaseModel):
+    """Read-only query settings."""
+
+    timeout: float = 10.0
+    rate_limit_per_second: int = 3
+    rate_limit_per_minute: int = 600
+
+
 _LEGACY_ENV_MAP: dict[str, dict[str, str]] = {
     "server": {
         "host": "yuanta_host",
@@ -86,6 +100,14 @@ _LEGACY_ENV_MAP: dict[str, dict[str, str]] = {
     "audit": {
         "enabled": "yuanta_audit_enabled",
         "file": "yuanta_audit_file",
+    },
+    "state": {
+        "db_path": "yuanta_db_path",
+    },
+    "query": {
+        "timeout": "yuanta_query_timeout",
+        "rate_limit_per_second": "yuanta_query_rate_limit_per_second",
+        "rate_limit_per_minute": "yuanta_query_rate_limit_per_minute",
     },
 }
 
@@ -137,6 +159,8 @@ class Settings(BaseSettings):
     yuanta: YuantaConfig = YuantaConfig()
     account: AccountConfig = AccountConfig()
     audit: AuditConfig = AuditConfig()
+    state: StateConfig = StateConfig()
+    query: QueryConfig = QueryConfig()
 
     @classmethod
     def settings_customise_sources(

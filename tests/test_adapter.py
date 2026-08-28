@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 
 from stock_broker_tw.yuanta.adapter import YuantaAdapter, YuantaAdapterError
@@ -132,3 +134,66 @@ def test_on_response_writes_to_event_queue() -> None:
     assert event.str_index == "Login"
     assert event.obj_handle is None
     assert event.obj_value is not None
+
+
+class FakeStoreResult:
+    StkStoreList: ClassVar[list] = []
+    OVStkStoreList: ClassVar[list] = []
+
+
+class FakeQueryTrader(FakeTrader):
+    def __init__(self) -> None:
+        super().__init__()
+        self.query_calls: list[tuple[tuple, dict]] = []
+        self.on_response = None
+
+    def GetStoreSummary(self, Account=None, **kwargs):
+        self.query_calls.append(((Account,), kwargs))
+        if self.on_response is not None:
+            self.on_response(1, 0, "GetStoreSummary", None, FakeStoreResult())
+        return True
+
+
+def test_query_calls_trader_and_waits_for_matching_response() -> None:
+    trader = FakeQueryTrader()
+    adapter = YuantaAdapter(trader=trader)
+    trader.on_response = adapter._on_response
+    adapter.open()
+    result = adapter.query("GetStoreSummary", Account="S98875005091", timeout=1)
+    assert result == {"stk_store_list": [], "ov_stk_store_list": []}
+    assert trader.query_calls == [(("S98875005091",), {})]
+
+    # A different response first must not be consumed by the query.
+    trader2 = FakeQueryTrader()
+    adapter2 = YuantaAdapter(trader=trader2)
+    trader2.on_response = adapter2._on_response
+    adapter2.open()
+    adapter2._on_response(1, 0, "GetBankBalance", None, object())
+    result2 = adapter2.query("GetStoreSummary", Account="A", timeout=1)
+    assert result2 == {"stk_store_list": [], "ov_stk_store_list": []}
+    # The unrelated event remains available to WebSocket consumers.
+    event = adapter2.event_queue.get(timeout=0.1)
+    assert event.str_index == "GetBankBalance"
+
+
+class FakePositionalOnlyQueryTrader(FakeTrader):
+    def __init__(self) -> None:
+        super().__init__()
+        self.args: tuple | None = None
+        self.on_response = None
+
+    def GetStoreSummary(self, Account):
+        self.args = (Account,)
+        if self.on_response is not None:
+            self.on_response(1, 0, "GetStoreSummary", None, FakeStoreResult())
+        return True
+
+
+def test_query_retries_positionally_when_trader_rejects_keywords() -> None:
+    trader = FakePositionalOnlyQueryTrader()
+    adapter = YuantaAdapter(trader=trader)
+    trader.on_response = adapter._on_response
+    adapter.open()
+    result = adapter.query("GetStoreSummary", Account="S98875005091", timeout=1)
+    assert result == {"stk_store_list": [], "ov_stk_store_list": []}
+    assert trader.args == ("S98875005091",)

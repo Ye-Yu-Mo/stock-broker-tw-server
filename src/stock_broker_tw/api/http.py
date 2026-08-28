@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -11,6 +12,7 @@ from prometheus_client import CONTENT_TYPE_LATEST
 from stock_broker_tw.audit import AuditLogger
 from stock_broker_tw.config import Settings
 from stock_broker_tw.metrics import metrics, render_metrics
+from stock_broker_tw.service.query import QueryError, QueryService
 from stock_broker_tw.service.session import LoginCredentials, SessionError, SessionService
 from stock_broker_tw.yuanta.adapter import YuantaAdapter
 
@@ -30,8 +32,23 @@ def get_session_service(request: Request) -> SessionService:
     return request.app.state.session_service
 
 
+def get_query_service(request: Request) -> QueryService:
+    return request.app.state.query_service
+
+
 def get_audit(request: Request) -> AuditLogger:
     return request.app.state.audit
+
+
+def _raise_query_error(exc: QueryError) -> None:
+    raise HTTPException(
+        status_code=exc.status_code,
+        detail={
+            "code": exc.code,
+            "message": exc.message,
+            "detail": exc.detail,
+        },
+    ) from exc
 
 
 async def require_token(
@@ -131,6 +148,144 @@ async def logout(request: Request) -> dict[str, Any]:
 async def status(request: Request) -> dict[str, Any]:
     service = get_session_service(request)
     return ok(service.status())
+
+
+@router.get("/api/v1/positions", dependencies=[Depends(require_token)])
+async def positions(request: Request, account: str | None = None) -> dict[str, Any]:
+    service = get_query_service(request)
+    try:
+        return ok(await service.positions(account=account, request_id=request.headers.get("X-Request-ID")))
+    except QueryError as exc:
+        _raise_query_error(exc)
+
+
+@router.get("/api/v1/account/balance", dependencies=[Depends(require_token)])
+async def account_balance(request: Request, account: str | None = None) -> dict[str, Any]:
+    service = get_query_service(request)
+    try:
+        return ok(await service.account_balance(account=account, request_id=request.headers.get("X-Request-ID")))
+    except QueryError as exc:
+        _raise_query_error(exc)
+
+
+@router.get("/api/v1/account/settlement", dependencies=[Depends(require_token)])
+async def settlement(request: Request, account: str | None = None) -> dict[str, Any]:
+    service = get_query_service(request)
+    try:
+        return ok(await service.settlement(account=account, request_id=request.headers.get("X-Request-ID")))
+    except QueryError as exc:
+        _raise_query_error(exc)
+
+
+@router.get("/api/v1/pnl/unrealized", dependencies=[Depends(require_token)])
+async def pnl_unrealized(
+    request: Request,
+    market_type: str = "TWSE",
+    stk_code: str = "",
+    account: str | None = None,
+) -> dict[str, Any]:
+    service = get_query_service(request)
+    try:
+        return ok(
+            await service.unrealized_pnl(
+                market_type=market_type,
+                stk_code=stk_code,
+                account=account,
+                request_id=request.headers.get("X-Request-ID"),
+            )
+        )
+    except QueryError as exc:
+        _raise_query_error(exc)
+
+
+@router.get("/api/v1/pnl/realized", dependencies=[Depends(require_token)])
+async def pnl_realized(
+    request: Request,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    account: str | None = None,
+) -> dict[str, Any]:
+    service = get_query_service(request)
+    try:
+        return ok(
+            await service.realized_pnl(
+                start_date=start_date or "",
+                end_date=end_date or "",
+                account=account,
+                request_id=request.headers.get("X-Request-ID"),
+            )
+        )
+    except QueryError as exc:
+        _raise_query_error(exc)
+
+
+@router.get("/api/v1/pnl/reversal", dependencies=[Depends(require_token)])
+async def pnl_reversal(
+    request: Request,
+    re_gain_loss: str | None = None,
+    account: str | None = None,
+) -> dict[str, Any]:
+    service = get_query_service(request)
+    payload: dict[str, Any] | None = None
+    if re_gain_loss:
+        try:
+            payload = json.loads(re_gain_loss)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "INVALID_REQUEST",
+                    "message": "re_gain_loss must be a JSON object",
+                    "detail": {"value": re_gain_loss},
+                },
+            ) from exc
+    try:
+        return ok(
+            await service.reversal_pnl(
+                re_gain_loss=payload,
+                account=account,
+                request_id=request.headers.get("X-Request-ID"),
+            )
+        )
+    except QueryError as exc:
+        _raise_query_error(exc)
+
+
+@router.get("/api/v1/reports/real", dependencies=[Depends(require_token)])
+async def reports_real(request: Request, account: str | None = None) -> dict[str, Any]:
+    service = get_query_service(request)
+    try:
+        return ok(await service.real_reports(account=account, request_id=request.headers.get("X-Request-ID")))
+    except QueryError as exc:
+        _raise_query_error(exc)
+
+
+@router.get("/api/v1/reports/real-merge", dependencies=[Depends(require_token)])
+async def reports_real_merge(request: Request, account: str | None = None) -> dict[str, Any]:
+    service = get_query_service(request)
+    try:
+        return ok(await service.real_reports_merge(account=account, request_id=request.headers.get("X-Request-ID")))
+    except QueryError as exc:
+        _raise_query_error(exc)
+
+
+@router.get("/api/v1/reports/order-trade", dependencies=[Depends(require_token)])
+async def reports_order_trade(
+    request: Request,
+    notshow_cancel: bool = False,
+    account: str | None = None,
+) -> dict[str, Any]:
+    service = get_query_service(request)
+    try:
+        return ok(
+            await service.order_trade_reports(
+                notshow_cancel=notshow_cancel,
+                account=account,
+                request_id=request.headers.get("X-Request-ID"),
+            )
+        )
+    except QueryError as exc:
+        _raise_query_error(exc)
 
 
 __all__ = ["router"]

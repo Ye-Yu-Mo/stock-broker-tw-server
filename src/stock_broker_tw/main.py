@@ -15,7 +15,10 @@ from stock_broker_tw.api.ws import router as ws_router
 from stock_broker_tw.audit import AuditLogger, setup_logging
 from stock_broker_tw.config import Settings, load_settings
 from stock_broker_tw.metrics import metrics
+from stock_broker_tw.service.query import QueryService
 from stock_broker_tw.service.session import SessionService
+from stock_broker_tw.state.recovery import run_startup_recovery
+from stock_broker_tw.state.store import StateStore
 from stock_broker_tw.yuanta.adapter import YuantaAdapter
 
 
@@ -41,11 +44,14 @@ def create_app(
 
     audit = AuditLogger(enabled=settings.audit.enabled, file_path=settings.audit.file)
     session_service = SessionService(adapter, settings, audit=audit)
+    state_store = StateStore(settings.state.db_path)
+    query_service = QueryService(adapter, settings, store=state_store, audit=audit)
     ws_manager = ConnectionManager()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await ws_manager.start(adapter.event_queue)
+        await run_startup_recovery(state_store, query_service, adapter)
         yield
         await ws_manager.stop()
 
@@ -58,6 +64,9 @@ def create_app(
     app.state.adapter = adapter
     app.state.audit = audit
     app.state.session_service = session_service
+    app.state.state_store = state_store
+    app.state.store = state_store
+    app.state.query_service = query_service
     app.state.ws_manager = ws_manager
 
     @app.middleware("http")

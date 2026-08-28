@@ -25,3 +25,11 @@ password = "1234"
 [audit]
 enabled = true
 # file = "state/audit.jsonl"   # optional JSON-lines audit file
+
+[state]
+db_path = "state/yuanta.db"
+
+[query]
+timeout = 10.0
+rate_limit_per_second = 3
+rate_limit_per_minute = 600
