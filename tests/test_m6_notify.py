@@ -22,14 +22,43 @@ def test_notifier_disabled_without_webhook() -> None:
 
 
 def test_notifier_posts_webhook_payload() -> None:
-    notifier = Notifier(enabled=True, webhook_url="http://example.test/hook", webhook_type="feishu")
+    notifier = Notifier(enabled=True, webhook_url="http://example.test/hook", webhook_type="generic")
     with mock.patch("urllib.request.urlopen") as mocked:
         assert notifier.send("risk.rejected", "风控拒绝", {"reason": "BLACKLISTED"}) is True
     assert mocked.call_count == 1
     request = mocked.call_args[0][0]
     body = json.loads(request.data.decode())
-    assert body["msg_type"] == "text"
-    assert "风控拒绝" in body["content"]["text"]
+    assert body["event"] == "risk.rejected"
+    assert "风控拒绝" in body["text"]
+
+
+def test_notifier_uses_lark_alert_card_when_installed() -> None:
+    import lark_alert
+
+    sent = []
+
+    class FakeAlert:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+        def send_card(self, card):
+            sent.append(card)
+
+    notifier = Notifier(
+        enabled=True,
+        webhook_url="https://example.com/hook",
+        webhook_type="feishu",
+        secret="s3cret",
+        timeout=2.0,
+    )
+    with mock.patch.object(lark_alert, "LarkAlert", FakeAlert):
+        assert notifier.send("order.status", "订单状态变化", {"client_order_id": "C001", "status": "FILLED"}) is True
+    assert len(sent) == 1
+    card = sent[0]
+    data = json.loads(card.to_json())
+    assert data["msg_type"] == "interactive"
+    assert data["card"]["header"]["template"] == "green"
 
 
 def test_notifier_unreachable_webhook_does_not_raise() -> None:

@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import urllib.request
+from datetime import UTC, datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,20 @@ class Notifier:
         self.secret = secret or None
         self.timeout = timeout
 
+    @staticmethod
+    def _severity_for(event: str, fields: dict[str, Any]) -> Any:
+        """Map broker events to lark_alert card severity levels."""
+        from lark_alert import Severity
+
+        status = str(fields.get("status") or "").upper()
+        if event in {"risk.rejected", "order.broker_error", "circuit.opened", "recovery.error"}:
+            return Severity.Error
+        if event == "risk.panic" or status in {"REJECTED", "FAILED", "CANCELLED"}:
+            return Severity.Warning
+        if event == "circuit.closed" or status == "FILLED":
+            return Severity.Success
+        return Severity.Info
+
     def _resolve(self, event: str, title: str, fields: dict[str, Any]) -> tuple[str, str]:
         """Return ``(title, text)`` after applying per-event configuration."""
         cfg = self.events.get(event)
@@ -131,7 +146,7 @@ class Notifier:
 
         if self.webhook_type.lower() in {"feishu", "lark"}:
             try:
-                from lark_alert import LarkAlert
+                from lark_alert import Card, LarkAlert
             except Exception:  # noqa: BLE001 - optional dependency fallback
                 logger.debug("lark_alert is not installed; falling back to built-in webhook sender")
             else:
@@ -142,10 +157,22 @@ class Notifier:
                         timeout_secs=int(self.timeout),
                         max_retries=1,
                     )
-                    alert.send_text(text)
+                    card = (
+                        Card()
+                        .severity(self._severity_for(event, fields))
+                        .title(resolved_title)
+                        .summary(text.splitlines()[0] if text else resolved_title)
+                        .service("stock-broker-tw-server")
+                        .environment(str(fields.get("environment") or "unknown"))
+                        .timestamp(datetime.now(UTC).isoformat())
+                        .details(text)
+                    )
+                    for key, value in fields.items():
+                        card.field(str(key), str(value))
+                    alert.send_card(card)
                     return True
                 except Exception as exc:  # noqa: BLE001 - notification must be best-effort
-                    logger.warning("notify lark_alert failed: %s", exc)
+                    logger.warning("notify lark_alert card failed: %s", exc)
                     return False
 
         payload = build_payload(event, resolved_title, fields, self.webhook_type, text=text)
