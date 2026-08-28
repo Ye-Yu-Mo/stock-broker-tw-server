@@ -33,8 +33,11 @@ class RiskError(Exception):
 class RiskEngine:
     """Evaluate configured rules against a :class:`StockOrderRequest`."""
 
-    def __init__(self, settings: Settings | Any) -> None:
+    def __init__(self, settings: Settings | Any, notifier: Any = None) -> None:
         self.settings = settings
+        self.notifier = notifier
+        config = self.config
+        self._panic = bool(getattr(config, "panic", False)) if config is not None else False
 
     @property
     def config(self) -> Any:
@@ -42,6 +45,28 @@ class RiskEngine:
             return self.settings.risk
         # Accept a bare RiskConfig object as well as a full Settings object.
         return self.settings if hasattr(self.settings, "panic") else None
+
+    @property
+    def panic(self) -> bool:
+        return self._panic
+
+    @panic.setter
+    def panic(self, value: bool) -> None:
+        self._panic = bool(value)
+
+    def set_panic(self, value: bool) -> None:
+        """Dynamically enable/disable the market panic switch."""
+        old = self._panic
+        self._panic = bool(value)
+        if old != self._panic and self.notifier is not None:
+            try:
+                self.notifier.send(
+                    "risk.panic",
+                    "市场 Panic 开关变化",
+                    {"panic": self._panic, "old": old},
+                )
+            except Exception:
+                pass
 
     def validate(self, request: StockOrderRequest | dict[str, Any]) -> list[str]:
         """Return a list of violation messages (empty when the request is OK)."""
@@ -51,7 +76,7 @@ class RiskEngine:
         if self.config is None:
             return failures
 
-        if self.config.panic:
+        if self.panic:
             failures.append("MARKET_PANIC: trading is stopped by panic switch")
 
         if self.config.blacklist and req.stk_code in self.config.blacklist:

@@ -14,6 +14,8 @@ from typing import Any
 from stock_broker_tw.audit import AuditLogger
 from stock_broker_tw.broker.quote import QuoteType, SubscribeRequest
 from stock_broker_tw.config import Settings
+from stock_broker_tw.metrics import metrics
+from stock_broker_tw.risk.circuit_breaker import CircuitBreaker
 from stock_broker_tw.risk.rate_limit import RateLimiter
 from stock_broker_tw.state.store import StateStore
 
@@ -46,19 +48,25 @@ class QuoteService:
         state_store: StateStore | None = None,
         rate_limiter: RateLimiter | None = None,
         audit: AuditLogger | None = None,
+        circuit_breaker: CircuitBreaker | None = None,
     ) -> None:
         self.adapter = adapter
         self.settings = settings
         self.store = store or state_store or StateStore(settings.state.db_path)
         self.state_store = self.store
+        quote_per_second = settings.rate_limit.quote_per_second
+        quote_per_minute = settings.rate_limit.quote_per_minute
+        if quote_per_second == 10 and settings.quote.rate_limit_per_second != 10:
+            quote_per_second = settings.quote.rate_limit_per_second
         self.rate_limiter = rate_limiter or RateLimiter(
-            max_per_second=settings.quote.rate_limit_per_second,
-            max_per_minute=None,
+            max_per_second=quote_per_second,
+            max_per_minute=quote_per_minute,
         )
         self.audit = audit or AuditLogger(
             enabled=settings.audit.enabled,
             file_path=settings.audit.file,
         )
+        self.circuit_breaker = circuit_breaker
 
     # -- public API ---------------------------------------------------------
 
@@ -92,14 +100,15 @@ class QuoteService:
             )
 
         existing = self.store.list_quote_subscriptions(account=account)
+        index_flag = self._index_flag(req)
         existing_keys = {
-            (row["type"], row["symbol"], row["market_type"]) for row in existing
+            (row["type"], row["symbol"], row["market_type"], row.get("index_flag")) for row in existing
         }
         new_symbols = list(
             dict.fromkeys(
                 symbol
                 for symbol in req.symbols
-                if (req.type.value, symbol, req.market_type) not in existing_keys
+                if (req.type.value, symbol, req.market_type, index_flag) not in existing_keys
             )
         )
 
@@ -117,7 +126,8 @@ class QuoteService:
             return self._serialize_rows(self.store.list_quote_subscriptions(account=account))
 
         function_name = req.type.subscribe_function
-        if not self.rate_limiter.acquire(function_name):
+        if not self.rate_limiter.acquire(function_name, key=account):
+            metrics.rate_limited_total.labels(function=function_name).inc()
             self.audit.record(
                 "quote.rate_limited",
                 result="error",
@@ -157,6 +167,7 @@ class QuoteService:
             quote_type=req.type.value,
             symbols=new_symbols,
             market_type=req.market_type,
+            index_flag=index_flag,
         )
         self.audit.record(
             "quote.subscribe",
@@ -184,21 +195,23 @@ class QuoteService:
         account = req.account or self.settings.account.account
 
         existing = self.store.list_quote_subscriptions(account=account)
+        index_flag = self._index_flag(req)
         existing_keys = {
-            (row["type"], row["symbol"], row["market_type"]) for row in existing
+            (row["type"], row["symbol"], row["market_type"], row.get("index_flag")) for row in existing
         }
         remove_symbols = list(
             dict.fromkeys(
                 symbol
                 for symbol in req.symbols
-                if (req.type.value, symbol, req.market_type) in existing_keys
+                if (req.type.value, symbol, req.market_type, index_flag) in existing_keys
             )
         )
         if not remove_symbols:
             return self._serialize_rows(existing)
 
         function_name = req.type.unsubscribe_function
-        if not self.rate_limiter.acquire(function_name):
+        if not self.rate_limiter.acquire(function_name, key=account):
+            metrics.rate_limited_total.labels(function=function_name).inc()
             self.audit.record(
                 "quote.rate_limited",
                 result="error",
@@ -238,6 +251,7 @@ class QuoteService:
             quote_type=req.type.value,
             symbols=remove_symbols,
             market_type=req.market_type,
+            index_flag=index_flag,
         )
         self.audit.record(
             "quote.unsubscribe",
@@ -262,6 +276,12 @@ class QuoteService:
     # -- helpers -----------------------------------------------------------
 
     @staticmethod
+    def _index_flag(req: SubscribeRequest) -> int | None:
+        if req.type is QuoteType.WATCHLIST:
+            return req.index_flag if req.index_flag is not None else 7
+        return req.index_flag
+
+    @staticmethod
     def _build_payload(req: SubscribeRequest, symbols: list[str]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for symbol in symbols:
@@ -275,37 +295,47 @@ class QuoteService:
         return rows
 
     async def _call_adapter(self, operation: str, function_name: str, account: str, payload: list[dict[str, Any]]) -> None:
-        method = getattr(self.adapter, operation, None)
-        if not callable(method):
-            # Compatibility with fakes that expose the Yuanta method directly.
-            method = getattr(self.adapter, function_name, None)
+        try:
+            method = getattr(self.adapter, operation, None)
             if not callable(method):
-                raise TypeError(f"adapter has no {operation}() or {function_name}()")
-            try:
-                call = method(account, payload)
-            except TypeError:
-                call = method(account, payload, 0)
-        else:
-            call = method(function_name, account, payload)
+                # Compatibility with fakes that expose the Yuanta method directly.
+                method = getattr(self.adapter, function_name, None)
+                if not callable(method):
+                    raise TypeError(f"adapter has no {operation}() or {function_name}()")
+                try:
+                    call = method(account, payload)
+                except TypeError:
+                    call = method(account, payload, 0)
+            else:
+                call = method(function_name, account, payload)
 
-        if asyncio.iscoroutine(call) or hasattr(call, "__await__"):
-            result = await call
-        else:
-            result = call
-        if result is False:
-            raise RuntimeError(f"{operation} {function_name} was rejected")
+            if asyncio.iscoroutine(call) or hasattr(call, "__await__"):
+                result = await call
+            else:
+                result = call
+            if result is False:
+                raise RuntimeError(f"{operation} {function_name} was rejected")
+        except Exception as exc:
+            if self.circuit_breaker is not None:
+                self.circuit_breaker.record_failure(exc)
+            raise
+        if self.circuit_breaker is not None:
+            self.circuit_breaker.record_success()
 
     @staticmethod
     def _serialize_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [
-            {
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item: dict[str, Any] = {
                 "account": row["account"],
                 "type": row["type"],
                 "symbol": row["symbol"],
                 "market_type": row["market_type"],
             }
-            for row in rows
-        ]
+            if row.get("index_flag") is not None:
+                item["index_flag"] = row["index_flag"]
+            result.append(item)
+        return result
 
 
 __all__ = ["QuoteService", "QuoteServiceError"]

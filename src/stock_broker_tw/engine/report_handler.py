@@ -36,9 +36,10 @@ _M3_STATUS = {
 class ReportHandler:
     """Translate raw real-report events into persisted order updates."""
 
-    def __init__(self, store: StateStore, broadcaster: Any = None) -> None:
+    def __init__(self, store: StateStore, broadcaster: Any = None, notifier: Any = None) -> None:
         self.store = store
         self.broadcaster = broadcaster
+        self.notifier = notifier
         self._state_machine = OrderStateMachine()
 
     async def handle_event(self, event: YuantaEvent) -> dict[str, Any] | None:
@@ -153,6 +154,21 @@ class ReportHandler:
                     )
 
         updated = self.store.get_stock_order(row["client_order_id"]) or {}
+        if self.notifier is not None:
+            try:
+                self.notifier.send(
+                    "order.status",
+                    "订单状态变化",
+                    {
+                        "client_order_id": row["client_order_id"],
+                        "status": final_status,
+                        "order_no": order_no or row.get("order_no"),
+                        "trade_date": row_trade_date,
+                        "report_type": report_type,
+                    },
+                )
+            except Exception:
+                pass
         self.store.save_orders(
             [
                 {

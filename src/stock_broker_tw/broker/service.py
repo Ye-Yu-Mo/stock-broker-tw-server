@@ -27,6 +27,9 @@ from stock_broker_tw.engine.state import (
     StockOrderState,
     TimeInForce,
 )
+from stock_broker_tw.metrics import metrics
+from stock_broker_tw.risk.circuit_breaker import CircuitBreaker
+from stock_broker_tw.risk.rate_limit import RateLimiter
 from stock_broker_tw.risk.rules import RiskEngine, RiskError
 from stock_broker_tw.state.store import StateStore
 
@@ -60,14 +63,27 @@ class BrokerService:
         queue: SerialOrderQueue | None = None,
         risk: RiskEngine | None = None,
         broadcaster: Any = None,
+        rate_limiter: RateLimiter | None = None,
+        circuit_breaker: CircuitBreaker | None = None,
+        notifier: Any = None,
     ) -> None:
         self.adapter = adapter
         self.settings = settings
         self.store = store or StateStore(settings.state.db_path)
         self.audit = audit or AuditLogger(enabled=settings.audit.enabled, file_path=settings.audit.file)
         self.queue = queue or SerialOrderQueue()
-        self.risk = risk or RiskEngine(settings)
+        self.risk = risk or RiskEngine(settings, notifier=notifier)
         self.broadcaster = broadcaster
+        self.notifier = notifier
+        self.rate_limiter = rate_limiter or RateLimiter(
+            max_per_second=settings.rate_limit.trade_per_second,
+            max_per_minute=settings.rate_limit.trade_per_minute,
+        )
+        self.circuit_breaker = circuit_breaker or CircuitBreaker(
+            failure_threshold=getattr(getattr(settings, "risk", None), "circuit_failure_threshold", 5),
+            cooldown_seconds=getattr(getattr(settings, "risk", None), "circuit_cooldown_seconds", 30.0),
+            notifier=notifier,
+        )
         self._state_machine = OrderStateMachine()
 
     # -- public API ---------------------------------------------------------
@@ -91,6 +107,8 @@ class BrokerService:
             )
 
         self._check_risk(req, "place", request_id)
+        self._check_write_circuit(req.client_order_id)
+        self._check_trade_rate(req, "place", request_id)
         self.audit.record(
             "order.place",
             result="attempt",
@@ -157,6 +175,8 @@ class BrokerService:
             )
         self._resolve_order_no(req)
         self._check_risk(req, "cancel", request_id)
+        self._check_write_circuit(req.client_order_id)
+        self._check_trade_rate(req, "cancel", request_id)
         self.audit.record(
             "order.cancel",
             result="attempt",
@@ -208,6 +228,7 @@ class BrokerService:
         request: StockOrderRequest | dict[str, Any],
         request_id: str | None = None,
     ) -> dict[str, Any]:
+        self._reject_simultaneous_replace(request)
         req = StockOrderRequest.from_dict(request)
         self._ensure_account(req)
         request_id = request_id or str(uuid.uuid4())
@@ -223,6 +244,8 @@ class BrokerService:
             )
         self._resolve_order_no(req)
         self._check_risk(req, "replace", request_id)
+        self._check_write_circuit(req.client_order_id)
+        self._check_trade_rate(req, "replace", request_id)
         self.audit.record(
             "order.replace",
             result="attempt",
@@ -274,6 +297,7 @@ class BrokerService:
         request: StockOrderRequest | dict[str, Any],
         request_id: str | None = None,
     ) -> dict[str, Any]:
+        self._reject_simultaneous_replace(request)
         req = StockOrderRequest.from_dict(request)
         action = req.action.value if isinstance(req.action, OrderAction) else str(req.action)
         if action == OrderAction.CANCEL.value:
@@ -310,6 +334,19 @@ class BrokerService:
         if not req.account:
             req.account = self.settings.account.account
 
+    @staticmethod
+    def _reject_simultaneous_replace(request: Any) -> None:
+        if not isinstance(request, dict):
+            return
+        action = str(request.get("action") or "new").lower()
+        if action == "replace" and request.get("new_price") is not None and request.get("new_quantity") is not None:
+            raise BrokerServiceError(
+                "simultaneously changing price and quantity is not supported; submit two replace operations",
+                code="REPLACE_BOTH_FIELDS_UNSUPPORTED",
+                status_code=400,
+                detail={"new_price": request.get("new_price"), "new_quantity": request.get("new_quantity")},
+            )
+
     def _check_risk(
         self,
         req: StockOrderRequest,
@@ -328,7 +365,67 @@ class BrokerService:
                 error=exc.message,
                 code=exc.code,
             )
+            self._notify(
+                "risk.rejected",
+                "风控拒绝",
+                {
+                    "client_order_id": req.client_order_id,
+                    "action": action,
+                    "code": exc.code,
+                    "message": exc.message,
+                },
+            )
             raise
+
+    def _check_write_circuit(self, client_order_id: str) -> None:
+        if not self.circuit_breaker.allow_request():
+            self.audit.record(
+                "order.circuit_open",
+                result="error",
+                account=None,
+                client_order_id=client_order_id,
+                error=self.circuit_breaker.last_error,
+            )
+            raise BrokerServiceError(
+                "trading circuit is open; write requests are temporarily blocked",
+                code="CIRCUIT_OPEN",
+                status_code=503,
+                detail={"circuit": self.circuit_breaker.to_dict()},
+            )
+
+    def _check_trade_rate(
+        self,
+        req: StockOrderRequest,
+        action: str,
+        request_id: str | None,
+    ) -> None:
+        if not self.rate_limiter.acquire("SendStockOrder", key=req.account):
+            metrics.rate_limited_total.labels(function="SendStockOrder").inc()
+            self.audit.record(
+                "order.rate_limited",
+                result="error",
+                request_id=request_id,
+                account=req.account,
+                client_order_id=req.client_order_id,
+                function="SendStockOrder",
+                action=action,
+            )
+            raise BrokerServiceError(
+                "trade rate limit exceeded",
+                code="RATE_LIMITED",
+                status_code=429,
+                detail={"function": "SendStockOrder", "action": action},
+            )
+
+    def _notify(self, event: str, title: str, fields: dict[str, Any]) -> None:
+        if self.notifier is None:
+            return
+        try:
+            method = getattr(self.notifier, "send", None)
+            if callable(method):
+                method(event, title, fields)
+        except Exception:
+            pass
 
     def _save_pending(self, req: StockOrderRequest) -> None:
         req.trade_date = self._date_to_str(req.trade_date)
@@ -385,18 +482,28 @@ class BrokerService:
             account=row.get("account"),
             action=row.get("action"),
         )
+        update_payload = {
+            "client_order_id": client_order_id,
+            "status": final_status,
+            "order_no": order_no,
+            "trade_date": trade_date,
+            "request": row.get("request"),
+            "data": data or {},
+            "last_error": error,
+        }
+        self._notify(
+            "order.status",
+            "订单状态变化",
+            {
+                "client_order_id": client_order_id,
+                "status": final_status,
+                "order_no": order_no,
+                "trade_date": trade_date,
+                "error": error,
+            },
+        )
         if self.broadcaster is not None and hasattr(self.broadcaster, "broadcast_order_update"):
-            broadcast = self.broadcaster.broadcast_order_update(
-                {
-                    "client_order_id": client_order_id,
-                    "status": final_status,
-                    "order_no": order_no,
-                    "trade_date": trade_date,
-                    "request": row.get("request"),
-                    "data": data or {},
-                    "last_error": error,
-                }
-            )
+            broadcast = self.broadcaster.broadcast_order_update(update_payload)
             if inspect.isawaitable(broadcast):
                 await broadcast
 
@@ -610,53 +717,68 @@ class BrokerService:
     async def _call_send(self, req: StockOrderRequest) -> Any:
         order = self._build_order(req)
         timeout = getattr(getattr(self.settings, "risk", None), "order_timeout", 10.0)
-        send = getattr(self.adapter, "send_stock_order", None)
-        if callable(send):
-            if asyncio.iscoroutinefunction(send):
-                try:
-                    result = await send(req.account, order, timeout=timeout)
-                except TypeError:
-                    result = await send(req.account, order)
+        try:
+            send = getattr(self.adapter, "send_stock_order", None)
+            if callable(send):
+                if asyncio.iscoroutinefunction(send):
+                    try:
+                        result = await send(req.account, order, timeout=timeout)
+                    except TypeError:
+                        result = await send(req.account, order)
+                else:
+                    try:
+                        result = await asyncio.to_thread(
+                            send, req.account, order, timeout=timeout
+                        )
+                    except TypeError:
+                        result = await asyncio.to_thread(send, req.account, order)
+                if inspect.isawaitable(result):
+                    result = await result
             else:
-                try:
-                    result = await asyncio.to_thread(
-                        send, req.account, order, timeout=timeout
+                query = getattr(self.adapter, "query", None)
+                if callable(query):
+                    if asyncio.iscoroutinefunction(query):
+                        try:
+                            result = await query(
+                                "SendStockOrder", req.account, [order], timeout=timeout
+                            )
+                        except TypeError:
+                            result = await query("SendStockOrder", req.account, [order])
+                    else:
+                        try:
+                            result = await asyncio.to_thread(
+                                query,
+                                "SendStockOrder",
+                                req.account,
+                                [order],
+                                timeout=timeout,
+                            )
+                        except TypeError:
+                            result = await asyncio.to_thread(
+                                query, "SendStockOrder", req.account, [order]
+                            )
+                    if inspect.isawaitable(result):
+                        result = await result
+                else:
+                    raise BrokerServiceError(
+                        "adapter does not support SendStockOrder",
+                        code="ADAPTER_UNSUPPORTED",
+                        status_code=501,
                     )
-                except TypeError:
-                    result = await asyncio.to_thread(send, req.account, order)
-            if inspect.isawaitable(result):
-                result = await result
-            return result
-        query = getattr(self.adapter, "query", None)
-        if callable(query):
-            if asyncio.iscoroutinefunction(query):
-                try:
-                    result = await query(
-                        "SendStockOrder", req.account, [order], timeout=timeout
-                    )
-                except TypeError:
-                    result = await query("SendStockOrder", req.account, [order])
-            else:
-                try:
-                    result = await asyncio.to_thread(
-                        query,
-                        "SendStockOrder",
-                        req.account,
-                        [order],
-                        timeout=timeout,
-                    )
-                except TypeError:
-                    result = await asyncio.to_thread(
-                        query, "SendStockOrder", req.account, [order]
-                    )
-            if inspect.isawaitable(result):
-                result = await result
-            return result
-        raise BrokerServiceError(
-            "adapter does not support SendStockOrder",
-            code="ADAPTER_UNSUPPORTED",
-            status_code=501,
-        )
+        except Exception as exc:
+            self.circuit_breaker.record_failure(exc)
+            self._notify(
+                "order.broker_error",
+                "委托发送异常",
+                {
+                    "client_order_id": req.client_order_id,
+                    "action": req.action.value if isinstance(req.action, OrderAction) else str(req.action),
+                    "error": str(exc),
+                },
+            )
+            raise
+        self.circuit_breaker.record_success()
+        return result
 
     def _build_order(self, req: StockOrderRequest) -> dict[str, Any]:
         return {

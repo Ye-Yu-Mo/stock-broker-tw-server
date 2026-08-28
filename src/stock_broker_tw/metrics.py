@@ -42,6 +42,26 @@ class Metrics:
             "Total requests rejected by risk/security checks",
             ["reason"],
         )
+        self.rate_limited_total = Counter(
+            "rate_limited_total",
+            "Total requests rejected by the unified rate limiter",
+            ["function"],
+        )
+        self.circuit_breaker_state = Gauge(
+            "circuit_breaker_state",
+            "Current circuit breaker state (1 = open, 0 = closed/half-open)",
+            ["name"],
+        )
+        self.circuit_breaker_opens_total = Counter(
+            "circuit_breaker_opens_total",
+            "Total times the circuit breaker has opened",
+            ["name"],
+        )
+        self.circuit_breaker_rejections_total = Counter(
+            "circuit_breaker_rejections_total",
+            "Total write requests rejected while the circuit is open",
+            ["name"],
+        )
 
 
 metrics = Metrics()

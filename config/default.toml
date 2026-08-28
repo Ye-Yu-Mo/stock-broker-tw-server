@@ -34,6 +34,19 @@ timeout = 10.0
 rate_limit_per_second = 3
 rate_limit_per_minute = 600
 
+[rate_limit]
+query_per_second = 3
+query_per_minute = 600
+quote_per_second = 10
+trade_per_second = 10
+trade_max_batch = 30
+
+[notify]
+enabled = false
+webhook_url = ""
+webhook_type = "generic"
+timeout = 3.0
+
 [risk]
 panic = false
 max_order_qty = 100000
@@ -42,3 +55,5 @@ max_price_deviation_pct = 10.0
 # reference_price = 100.0
 # blacklist = ["2330", "0050"]
 order_timeout = 10.0
+circuit_failure_threshold = 5
+circuit_cooldown_seconds = 30.0

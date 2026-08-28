@@ -18,6 +18,9 @@ from stock_broker_tw.config import Settings, load_settings
 from stock_broker_tw.engine.queue import SerialOrderQueue
 from stock_broker_tw.engine.report_handler import ReportHandler
 from stock_broker_tw.metrics import metrics
+from stock_broker_tw.notify import Notifier
+from stock_broker_tw.risk.circuit_breaker import CircuitBreaker
+from stock_broker_tw.risk.rate_limit import RateLimiter
 from stock_broker_tw.risk.rules import RiskEngine
 from stock_broker_tw.service.query import QueryService
 from stock_broker_tw.service.quote import QuoteService
@@ -48,12 +51,98 @@ def create_app(
     )
 
     audit = AuditLogger(enabled=settings.audit.enabled, file_path=settings.audit.file)
+    notifier = Notifier(config=settings.notify)
     session_service = SessionService(adapter, settings, audit=audit)
     state_store = StateStore(settings.state.db_path)
-    query_service = QueryService(adapter, settings, store=state_store, audit=audit)
-    quote_service = QuoteService(adapter, settings, store=state_store, audit=audit)
+    # Keep M3/M4 explicit query/quote rate settings working while still
+    # allowing the unified rate_limit block to override them.
+    query_per_second = settings.rate_limit.query_per_second
+    query_per_minute = settings.rate_limit.query_per_minute
+    if query_per_second == 3 and settings.query.rate_limit_per_second != 3:
+        query_per_second = settings.query.rate_limit_per_second
+    if query_per_minute == 600 and settings.query.rate_limit_per_minute != 600:
+        query_per_minute = settings.query.rate_limit_per_minute
+    rate_limiter = RateLimiter(
+        max_per_second=query_per_second,
+        max_per_minute=query_per_minute,
+        limits={
+            "SendStockOrder": (
+                settings.rate_limit.trade_per_second,
+                settings.rate_limit.trade_per_minute,
+            ),
+            "SubscribeWatchlist": (
+                settings.rate_limit.quote_per_second,
+                settings.rate_limit.quote_per_minute,
+            ),
+            "UnSubscribeWatchlist": (
+                settings.rate_limit.quote_per_second,
+                settings.rate_limit.quote_per_minute,
+            ),
+            "SubscribeWatchlistAll": (
+                settings.rate_limit.quote_per_second,
+                settings.rate_limit.quote_per_minute,
+            ),
+            "UnSubscribeWatchlistAll": (
+                settings.rate_limit.quote_per_second,
+                settings.rate_limit.quote_per_minute,
+            ),
+            "SubscribeFiveTickA": (
+                settings.rate_limit.quote_per_second,
+                settings.rate_limit.quote_per_minute,
+            ),
+            "UnSubscribeFiveTickA": (
+                settings.rate_limit.quote_per_second,
+                settings.rate_limit.quote_per_minute,
+            ),
+            "SubscribeStockTick": (
+                settings.rate_limit.quote_per_second,
+                settings.rate_limit.quote_per_minute,
+            ),
+            "UnSubscribeStockTick": (
+                settings.rate_limit.quote_per_second,
+                settings.rate_limit.quote_per_minute,
+            ),
+            "SubscribeMarketInformation": (
+                settings.rate_limit.quote_per_second,
+                settings.rate_limit.quote_per_minute,
+            ),
+            "UnSubscribeMarketInformation": (
+                settings.rate_limit.quote_per_second,
+                settings.rate_limit.quote_per_minute,
+            ),
+            "SubscribeStockInformation": (
+                settings.rate_limit.quote_per_second,
+                settings.rate_limit.quote_per_minute,
+            ),
+            "UnSubscribeStockInformation": (
+                settings.rate_limit.quote_per_second,
+                settings.rate_limit.quote_per_minute,
+            ),
+        },
+    )
     ws_manager = ConnectionManager()
-    risk_engine = RiskEngine(settings)
+    circuit_breaker = CircuitBreaker(
+        failure_threshold=getattr(settings.risk, "circuit_failure_threshold", 5),
+        cooldown_seconds=getattr(settings.risk, "circuit_cooldown_seconds", 30.0),
+        notifier=notifier,
+    )
+    query_service = QueryService(
+        adapter,
+        settings,
+        store=state_store,
+        audit=audit,
+        rate_limiter=rate_limiter,
+        circuit_breaker=circuit_breaker,
+    )
+    quote_service = QuoteService(
+        adapter,
+        settings,
+        store=state_store,
+        audit=audit,
+        rate_limiter=rate_limiter,
+        circuit_breaker=circuit_breaker,
+    )
+    risk_engine = RiskEngine(settings, notifier=notifier)
     order_queue = SerialOrderQueue()
     broker_service = BrokerService(
         adapter,
@@ -63,13 +152,23 @@ def create_app(
         queue=order_queue,
         risk=risk_engine,
         broadcaster=ws_manager,
+        rate_limiter=rate_limiter,
+        circuit_breaker=circuit_breaker,
+        notifier=notifier,
     )
-    report_handler = ReportHandler(state_store, broadcaster=ws_manager)
+    report_handler = ReportHandler(state_store, broadcaster=ws_manager, notifier=notifier)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await ws_manager.start(adapter.event_queue, report_handler=report_handler)
-        await run_startup_recovery(state_store, query_service, adapter)
+        last_recovery = await run_startup_recovery(
+            state_store,
+            query_service,
+            adapter,
+            audit=audit,
+            notifier=notifier,
+        )
+        app.state.last_recovery = last_recovery
         yield
         await ws_manager.stop()
 
@@ -88,9 +187,12 @@ def create_app(
     app.state.quote_service = quote_service
     app.state.ws_manager = ws_manager
     app.state.risk_engine = risk_engine
+    app.state.circuit_breaker = circuit_breaker
+    app.state.notifier = notifier
     app.state.order_queue = order_queue
     app.state.broker_service = broker_service
     app.state.report_handler = report_handler
+    app.state.last_recovery = None
 
     @app.middleware("http")
     async def metrics_middleware(request, call_next):

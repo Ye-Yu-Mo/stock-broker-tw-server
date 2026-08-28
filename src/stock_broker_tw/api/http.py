@@ -81,6 +81,14 @@ def get_quote_service(request: Request) -> QuoteService:
     return request.app.state.quote_service
 
 
+def get_risk_engine(request: Request):
+    return request.app.state.risk_engine
+
+
+def get_circuit_breaker(request: Request):
+    return request.app.state.circuit_breaker
+
+
 def _raise_query_error(exc: QueryError) -> None:
     raise HTTPException(
         status_code=exc.status_code,
@@ -101,6 +109,19 @@ def _raise_quote_error(exc: QuoteServiceError) -> None:
             "detail": exc.detail,
         },
     ) from exc
+
+
+def _quote_list_items(data: Any) -> Any:
+    """Normalize GetQuoteList responses into a list of quote rows."""
+    if isinstance(data, dict):
+        for key in ("quote_list", "QuoteList", "items"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+        return data
+    if isinstance(data, list):
+        return data
+    return data
 
 
 async def require_token(
@@ -137,6 +158,9 @@ async def health(request: Request) -> dict[str, Any]:
         event_queue_size = 0
 
     settings = get_settings(request)
+    risk_engine = getattr(request.app.state, "risk_engine", None)
+    circuit_breaker = getattr(request.app.state, "circuit_breaker", None)
+    last_recovery = getattr(request.app.state, "last_recovery", None)
     return {
         "status": "ok" if adapter_ready else "degraded",
         "adapter_ready": adapter_ready,
@@ -146,6 +170,11 @@ async def health(request: Request) -> dict[str, Any]:
         "audit_file": settings.audit.file,
         "version": "0.1.0",
         "environment": settings.yuanta.environment,
+        "panic": bool(getattr(risk_engine, "panic", False)) if risk_engine is not None else False,
+        "circuit_breaker_open": bool(getattr(circuit_breaker, "is_open", False)) if circuit_breaker is not None else False,
+        "circuit_breaker": circuit_breaker.to_dict() if circuit_breaker is not None else None,
+        "last_failure": getattr(circuit_breaker, "last_error", None) if circuit_breaker is not None else None,
+        "last_recovery": last_recovery,
     }
 
 
@@ -372,9 +401,34 @@ async def quotes_subscribed(
     account: str | None = None,
     type: str | None = None,
     quote_type: str | None = None,
+    source: str = "local",
 ) -> dict[str, Any]:
     service = get_quote_service(request)
-    return ok(service.list_subscribed(account=account, quote_type=type or quote_type))
+    acct = account or request.app.state.settings.account.account
+    normalized_source = (source or "local").lower()
+    if normalized_source in {"broker", "remote", "yuanta"}:
+        query_service = get_query_service(request)
+        try:
+            broker = await query_service.quote_list(
+                account=acct,
+                request_id=request.headers.get("X-Request-ID"),
+            )
+        except QueryError as exc:
+            _raise_query_error(exc)
+        return ok({"source": "broker", "items": _quote_list_items(broker)})
+    if normalized_source in {"both", "all"}:
+        local = service.list_subscribed(account=acct, quote_type=type or quote_type)
+        query_service = get_query_service(request)
+        try:
+            broker = await query_service.quote_list(
+                account=acct,
+                request_id=request.headers.get("X-Request-ID"),
+            )
+        except QueryError as exc:
+            _raise_query_error(exc)
+        return ok({"source": "both", "local": local, "broker": _quote_list_items(broker)})
+    # Backwards-compatible default: return the local subscription list directly.
+    return ok(service.list_subscribed(account=acct, quote_type=type or quote_type))
 
 
 @router.get("/api/v1/quotes/snapshot", dependencies=[Depends(require_token)])
@@ -516,6 +570,15 @@ async def submit_stock_order(request: Request, payload: StockOrderPayload) -> di
     request_id = request.headers.get("X-Request-ID")
     data = payload.model_dump()
     if payload.action == OrderAction.REPLACE:
+        if data.get("new_price") is not None and data.get("new_quantity") is not None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "REPLACE_BOTH_FIELDS_UNSUPPORTED",
+                    "message": "simultaneously changing price and quantity is not supported; submit two replace operations",
+                    "detail": {"new_price": data.get("new_price"), "new_quantity": data.get("new_quantity")},
+                },
+            )
         if data.get("new_price") is not None:
             data["price"] = data["new_price"]
         if data.get("new_quantity") is not None:
@@ -558,6 +621,106 @@ async def get_order(request: Request, client_order_id: str) -> dict[str, Any]:
             },
         )
     return ok(order)
+
+
+@router.post("/api/v1/control/panic", dependencies=[Depends(require_token)])
+async def control_panic(request: Request) -> dict[str, Any]:
+    """Dynamically enable market panic (blocks all trading)."""
+    risk_engine = get_risk_engine(request)
+    risk_engine.set_panic(True)
+    get_audit(request).record("control.panic", result="success", account=None)
+    return ok({"panic": True})
+
+
+@router.post("/api/v1/control/resume", dependencies=[Depends(require_token)])
+async def control_resume(request: Request) -> dict[str, Any]:
+    """Dynamically disable market panic and reset the circuit breaker."""
+    risk_engine = get_risk_engine(request)
+    risk_engine.set_panic(False)
+    circuit_breaker = get_circuit_breaker(request)
+    if circuit_breaker is not None:
+        circuit_breaker.manual_reset()
+    get_audit(request).record("control.resume", result="success", account=None)
+    return ok({"panic": False, "circuit_breaker": circuit_breaker.to_dict() if circuit_breaker is not None else None})
+
+
+@router.get("/api/v1/recovery/unresolved", dependencies=[Depends(require_token)])
+async def recovery_unresolved(request: Request) -> dict[str, Any]:
+    """Return orders that startup recovery could not resolve automatically."""
+    store = request.app.state.store
+    return ok(store.list_unresolved_recovery())
+
+
+class ResolveRecoveryPayload(BaseModel):
+    """Body for manually resolving an unknown order."""
+
+    status: str = "FILLED"
+    order_no: str | None = None
+    trade_date: str | None = None
+    source: str | None = None
+    note: str | None = None
+
+
+@router.post("/api/v1/recovery/{client_order_id}/resolve", dependencies=[Depends(require_token)])
+async def recovery_resolve(
+    request: Request,
+    client_order_id: str,
+    payload: ResolveRecoveryPayload | None = None,
+) -> dict[str, Any]:
+    """Manually confirm/resolve an unknown order."""
+    store = request.app.state.store
+    body = payload.model_dump() if payload is not None else {}
+    status = body.get("status") or "FILLED"
+    order_no = body.get("order_no")
+    trade_date = body.get("trade_date")
+    note = body.get("note")
+    source = (body.get("source") or "").lower()
+
+    if source == "orders":
+        if not order_no:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "ORDER_NO_REQUIRED", "message": "order_no is required for legacy orders"},
+            )
+        resolved = store.resolve_legacy_order(
+            order_no=order_no,
+            status=status,
+            trade_date=trade_date,
+            note=note,
+        )
+        if resolved is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "ORDER_NOT_FOUND", "message": "legacy order not found", "detail": {"order_no": order_no}},
+            )
+        get_audit(request).record("recovery.resolve", result="success", account=None, client_order_id=client_order_id, source="orders", status=status)
+        return ok(resolved)
+
+    resolved = store.resolve_stock_order(
+        client_order_id,
+        status=status,
+        order_no=order_no,
+        trade_date=trade_date,
+        note=note,
+    )
+    if resolved is None and (order_no or client_order_id):
+        legacy_order_no = order_no or client_order_id
+        resolved = store.resolve_legacy_order(
+            order_no=legacy_order_no,
+            status=status,
+            trade_date=trade_date,
+            note=note,
+        )
+        if resolved is not None:
+            get_audit(request).record("recovery.resolve", result="success", account=None, client_order_id=client_order_id, source="orders", status=status)
+            return ok(resolved)
+    if resolved is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ORDER_NOT_FOUND", "message": "order not found", "detail": {"client_order_id": client_order_id}},
+        )
+    get_audit(request).record("recovery.resolve", result="success", account=None, client_order_id=client_order_id, source="stock_orders", status=status)
+    return ok(resolved)
 
 
 __all__ = ["router"]

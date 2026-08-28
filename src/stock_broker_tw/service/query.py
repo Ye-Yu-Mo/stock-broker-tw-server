@@ -8,6 +8,8 @@ from typing import Any
 
 from stock_broker_tw.audit import AuditLogger
 from stock_broker_tw.config import Settings
+from stock_broker_tw.metrics import metrics
+from stock_broker_tw.risk.circuit_breaker import CircuitBreaker
 from stock_broker_tw.risk.rate_limit import RateLimiter
 from stock_broker_tw.state.store import StateStore
 
@@ -40,19 +42,27 @@ class QueryService:
         state_store: StateStore | None = None,
         rate_limiter: RateLimiter | None = None,
         audit: AuditLogger | None = None,
+        circuit_breaker: CircuitBreaker | None = None,
     ) -> None:
         self.adapter = adapter
         self.settings = settings
         self.store = store or state_store or StateStore(settings.state.db_path)
         self.state_store = self.store
+        query_per_second = settings.rate_limit.query_per_second
+        query_per_minute = settings.rate_limit.query_per_minute
+        if query_per_second == 3 and settings.query.rate_limit_per_second != 3:
+            query_per_second = settings.query.rate_limit_per_second
+        if query_per_minute == 600 and settings.query.rate_limit_per_minute != 600:
+            query_per_minute = settings.query.rate_limit_per_minute
         self.rate_limiter = rate_limiter or RateLimiter(
-            max_per_second=settings.query.rate_limit_per_second,
-            max_per_minute=settings.query.rate_limit_per_minute,
+            max_per_second=query_per_second,
+            max_per_minute=query_per_minute,
         )
         self.audit = audit or AuditLogger(
             enabled=settings.audit.enabled,
             file_path=settings.audit.file,
         )
+        self.circuit_breaker = circuit_breaker
 
     # -- public query methods ---------------------------------------------
 
@@ -378,7 +388,8 @@ class QueryService:
         return account or self.settings.account.account
 
     async def _query(self, function_name: str, request_id: str | None = None, **params: Any) -> Any:
-        if not self.rate_limiter.acquire(function_name):
+        if not self.rate_limiter.acquire(function_name, key=params.get("Account")):
+            metrics.rate_limited_total.labels(function=function_name).inc()
             self.audit.record(
                 "query.rate_limited",
                 result="error",
@@ -422,6 +433,8 @@ class QueryService:
                 timeout=self.settings.query.timeout,
             )
         except TimeoutError as exc:
+            if self.circuit_breaker is not None:
+                self.circuit_breaker.record_failure(exc)
             self.audit.record(
                 "query.timeout",
                 result="error",
@@ -439,6 +452,8 @@ class QueryService:
         except QueryError:
             raise
         except Exception as exc:
+            if self.circuit_breaker is not None:
+                self.circuit_breaker.record_failure(exc)
             self.audit.record(
                 "query.error",
                 result="error",
@@ -461,6 +476,8 @@ class QueryService:
             account=params.get("Account"),
             function=function_name,
         )
+        if self.circuit_breaker is not None:
+            self.circuit_breaker.record_success()
         return result
 
     @staticmethod

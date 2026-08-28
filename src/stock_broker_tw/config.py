@@ -87,6 +87,27 @@ class QuoteConfig(BaseModel):
     rate_limit_per_second: int = 10
 
 
+class RateLimitConfig(BaseModel):
+    """Unified per-FunctionID rate limits (query/quote/trade)."""
+
+    query_per_second: int = 3
+    query_per_minute: int = 600
+    quote_per_second: int = 10
+    quote_per_minute: int | None = None
+    trade_per_second: int = 10
+    trade_per_minute: int | None = None
+    trade_max_batch: int = 30
+
+
+class NotifyConfig(BaseModel):
+    """Webhook notification settings."""
+
+    enabled: bool = False
+    webhook_url: str = ""
+    webhook_type: str = "generic"
+    timeout: float = 3.0
+
+
 class RiskConfig(BaseModel):
     """Trading risk controls."""
 
@@ -97,6 +118,8 @@ class RiskConfig(BaseModel):
     reference_price: float | None = None
     blacklist: list[str] = []
     order_timeout: float = 10.0
+    circuit_failure_threshold: int = 5
+    circuit_cooldown_seconds: float = 30.0
 
 
 _LEGACY_ENV_MAP: dict[str, dict[str, str]] = {
@@ -136,6 +159,21 @@ _LEGACY_ENV_MAP: dict[str, dict[str, str]] = {
         "max_total_subscriptions": "yuanta_quote_max_total_subscriptions",
         "rate_limit_per_second": "yuanta_quote_rate_limit_per_second",
     },
+    "rate_limit": {
+        "query_per_second": "yuanta_rate_limit_query_per_second",
+        "query_per_minute": "yuanta_rate_limit_query_per_minute",
+        "quote_per_second": "yuanta_rate_limit_quote_per_second",
+        "quote_per_minute": "yuanta_rate_limit_quote_per_minute",
+        "trade_per_second": "yuanta_rate_limit_trade_per_second",
+        "trade_per_minute": "yuanta_rate_limit_trade_per_minute",
+        "trade_max_batch": "yuanta_rate_limit_trade_max_batch",
+    },
+    "notify": {
+        "enabled": "yuanta_notify_enabled",
+        "webhook_url": "yuanta_notify_webhook_url",
+        "webhook_type": "yuanta_notify_webhook_type",
+        "timeout": "yuanta_notify_timeout",
+    },
     "risk": {
         "panic": "yuanta_risk_panic",
         "max_order_qty": "yuanta_risk_max_order_qty",
@@ -144,6 +182,8 @@ _LEGACY_ENV_MAP: dict[str, dict[str, str]] = {
         "reference_price": "yuanta_risk_reference_price",
         "blacklist": "yuanta_risk_blacklist",
         "order_timeout": "yuanta_risk_order_timeout",
+        "circuit_failure_threshold": "yuanta_risk_circuit_failure_threshold",
+        "circuit_cooldown_seconds": "yuanta_risk_circuit_cooldown_seconds",
     },
 }
 
@@ -198,6 +238,8 @@ class Settings(BaseSettings):
     state: StateConfig = StateConfig()
     query: QueryConfig = QueryConfig()
     quote: QuoteConfig = QuoteConfig()
+    rate_limit: RateLimitConfig = RateLimitConfig()
+    notify: NotifyConfig = NotifyConfig()
     risk: RiskConfig = RiskConfig()
 
     @classmethod

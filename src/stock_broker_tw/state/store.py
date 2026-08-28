@@ -47,7 +47,7 @@ class StateStore:
         self.db_path = Path(db_path)
         self._memory_conn: sqlite3.Connection | None = None
         if str(self.db_path) == ":memory:":
-            self._memory_conn = sqlite3.connect(":memory:")
+            self._memory_conn = sqlite3.connect(":memory:", check_same_thread=False)
             self._memory_conn.row_factory = sqlite3.Row
         elif self.db_path.parent and str(self.db_path.parent) != ".":
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -104,8 +104,7 @@ class StateStore:
                     trade_date TEXT,
                     company_no TEXT,
                     data TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    UNIQUE(order_no, trade_date)
+                    created_at TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS reports (
@@ -125,8 +124,9 @@ class StateStore:
                     quote_type TEXT NOT NULL,
                     symbol TEXT NOT NULL,
                     market_type TEXT NOT NULL DEFAULT 'TWSE',
+                    index_flag INTEGER,
                     created_at TEXT NOT NULL,
-                    UNIQUE(account, quote_type, symbol, market_type)
+                    UNIQUE(account, quote_type, symbol, market_type, index_flag)
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_orders_order_no ON orders(order_no);
@@ -138,6 +138,88 @@ class StateStore:
                 CREATE INDEX IF NOT EXISTS idx_quote_subscriptions_account ON quote_subscriptions(account);
                 """
             )
+            self._migrate_trades_table()
+            self._migrate_quote_subscriptions_table()
+
+    def _migrate_trades_table(self) -> None:
+        """Rebuild ``trades`` without the old unique(order_no, trade_date)."""
+        with self._connect() as conn:
+            indexes = conn.execute("PRAGMA index_list('trades')").fetchall()
+            has_unique = any(
+                row["origin"] == "u" if "origin" in row else row[3] == "u"
+                for row in indexes
+            )
+            if not has_unique:
+                return
+            conn.execute(
+                """
+                CREATE TABLE trades_migrated (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    order_no TEXT NOT NULL,
+                    account TEXT,
+                    trade_date TEXT,
+                    company_no TEXT,
+                    data TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO trades_migrated (id, order_no, account, trade_date, company_no, data, created_at)
+                SELECT id, order_no, account, trade_date, company_no, data, created_at FROM trades
+                """
+            )
+            conn.execute("DROP TABLE trades")
+            conn.execute("ALTER TABLE trades_migrated RENAME TO trades")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_order_no ON trades(order_no)")
+
+    def _migrate_quote_subscriptions_table(self) -> None:
+        """Rebuild ``quote_subscriptions`` to include ``index_flag`` in the key."""
+        with self._connect() as conn:
+            columns = [row["name"] for row in conn.execute("PRAGMA table_info('quote_subscriptions')").fetchall()]
+            has_index_flag = "index_flag" in columns
+            has_index_in_unique = any(
+                "index_flag" in (row["name"] or "")
+                for row in conn.execute("PRAGMA index_info('sqlite_autoindex_quote_subscriptions_1')").fetchall()
+            )
+            if has_index_flag and has_index_in_unique:
+                return
+            conn.execute(
+                """
+                CREATE TABLE quote_subscriptions_migrated (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account TEXT NOT NULL,
+                    quote_type TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    market_type TEXT NOT NULL DEFAULT 'TWSE',
+                    index_flag INTEGER,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(account, quote_type, symbol, market_type, index_flag)
+                )
+                """
+            )
+            if has_index_flag:
+                conn.execute(
+                    """
+                    INSERT INTO quote_subscriptions_migrated
+                        (id, account, quote_type, symbol, market_type, index_flag, created_at)
+                    SELECT id, account, quote_type, symbol, market_type, index_flag, created_at
+                    FROM quote_subscriptions
+                    """
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO quote_subscriptions_migrated
+                        (id, account, quote_type, symbol, market_type, index_flag, created_at)
+                    SELECT id, account, quote_type, symbol, market_type, NULL, created_at
+                    FROM quote_subscriptions
+                    """
+                )
+            conn.execute("DROP TABLE quote_subscriptions")
+            conn.execute("ALTER TABLE quote_subscriptions_migrated RENAME TO quote_subscriptions")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_quote_subscriptions_account ON quote_subscriptions(account)")
 
     # -- snapshots ---------------------------------------------------------
 
@@ -407,7 +489,7 @@ class StateStore:
     # -- trades ------------------------------------------------------------
 
     def save_trades(self, trades: Iterable[dict[str, Any]]) -> None:
-        """Insert or replace trade records keyed by order_no/trade_date."""
+        """Insert trade records; multiple fills for the same order/date are kept."""
         for trade in trades:
             order_no = trade.get("order_no")
             if not order_no:
@@ -420,11 +502,6 @@ class StateStore:
                     """
                     INSERT INTO trades (order_no, account, trade_date, company_no, data, created_at)
                     VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(order_no, trade_date) DO UPDATE SET
-                        account = excluded.account,
-                        company_no = excluded.company_no,
-                        data = excluded.data,
-                        created_at = excluded.created_at
                     """,
                     (order_no, account, trade_date, company_no, _json_dumps(trade), _now()),
                 )
@@ -482,8 +559,9 @@ class StateStore:
         quote_type: str,
         symbols: Iterable[str] | str,
         market_type: str = "TWSE",
+        index_flag: int | None = None,
     ) -> None:
-        """Insert quote subscription rows, ignoring duplicates."""
+        """Insert quote subscription rows, ignoring duplicates by full key."""
         if isinstance(symbols, str):
             symbols = [symbols]
         quote_type = str(quote_type)
@@ -494,10 +572,10 @@ class StateStore:
                 conn.execute(
                     """
                     INSERT OR IGNORE INTO quote_subscriptions
-                        (account, quote_type, symbol, market_type, created_at)
-                    VALUES (?, ?, ?, ?, ?)
+                        (account, quote_type, symbol, market_type, index_flag, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (account, quote_type, str(symbol), market_type, _now()),
+                    (account, quote_type, str(symbol), market_type, index_flag, _now()),
                 )
 
     def save_quote_subscription(
@@ -506,9 +584,10 @@ class StateStore:
         quote_type: str,
         symbol: str,
         market_type: str = "TWSE",
+        index_flag: int | None = None,
     ) -> None:
         """Insert one quote subscription row."""
-        self.save_quote_subscriptions(account, quote_type, [symbol], market_type)
+        self.save_quote_subscriptions(account, quote_type, [symbol], market_type, index_flag=index_flag)
 
     def delete_quote_subscriptions(
         self,
@@ -516,8 +595,9 @@ class StateStore:
         quote_type: str,
         symbols: Iterable[str] | str,
         market_type: str = "TWSE",
+        index_flag: int | None = None,
     ) -> None:
-        """Delete quote subscription rows for the given symbols."""
+        """Delete quote subscription rows for the given full key."""
         quote_type = str(quote_type)
         if isinstance(symbols, str):
             symbols = [symbols]
@@ -529,8 +609,9 @@ class StateStore:
                     """
                     DELETE FROM quote_subscriptions
                     WHERE account = ? AND quote_type = ? AND symbol = ? AND market_type = ?
+                        AND index_flag IS ?
                     """,
-                    (account, quote_type, str(symbol), market_type),
+                    (account, quote_type, str(symbol), market_type, index_flag),
                 )
 
     def delete_quote_subscription(
@@ -539,17 +620,19 @@ class StateStore:
         quote_type: str,
         symbol: str,
         market_type: str = "TWSE",
+        index_flag: int | None = None,
     ) -> None:
         """Delete one quote subscription row."""
-        self.delete_quote_subscriptions(account, quote_type, [symbol], market_type)
+        self.delete_quote_subscriptions(account, quote_type, [symbol], market_type, index_flag=index_flag)
 
     def list_quote_subscriptions(
         self,
         account: str | None = None,
         quote_type: str | None = None,
+        index_flag: int | None = None,
     ) -> list[dict[str, Any]]:
         """Return quote subscriptions, optionally filtered by account/type."""
-        sql = "SELECT account, quote_type, symbol, market_type, created_at FROM quote_subscriptions"
+        sql = "SELECT account, quote_type, symbol, market_type, index_flag, created_at FROM quote_subscriptions"
         conditions: list[str] = []
         params: list[Any] = []
         if account:
@@ -558,6 +641,9 @@ class StateStore:
         if quote_type:
             conditions.append("quote_type = ?")
             params.append(str(quote_type))
+        if index_flag is not None:
+            conditions.append("index_flag = ?")
+            params.append(index_flag)
         if conditions:
             sql += " WHERE " + " AND ".join(conditions)
         sql += " ORDER BY id"
@@ -568,6 +654,7 @@ class StateStore:
                 "type": row["quote_type"],
                 "symbol": row["symbol"],
                 "market_type": row["market_type"],
+                "index_flag": row["index_flag"],
                 "created_at": row["created_at"],
             }
             for row in rows
@@ -577,13 +664,87 @@ class StateStore:
         self,
         account: str | None = None,
         quote_type: str | None = None,
+        index_flag: int | None = None,
     ) -> list[dict[str, Any]]:
         """Alias for :meth:`list_quote_subscriptions`."""
-        return self.list_quote_subscriptions(account=account, quote_type=quote_type)
+        return self.list_quote_subscriptions(account=account, quote_type=quote_type, index_flag=index_flag)
 
     def count_quote_subscriptions(self, account: str | None = None) -> int:
         """Return the number of stored quote subscription rows."""
         return len(self.list_quote_subscriptions(account=account))
+
+    # -- M6 recovery helpers ----------------------------------------------
+
+    def get_unfinished_stock_orders(self) -> list[dict[str, Any]]:
+        """Return M4 stock orders whose status is not a final state."""
+        rows = self._fetchall(
+            "SELECT * FROM stock_orders WHERE status NOT IN ('FILLED','CANCELLED','REJECTED','FAILED') ORDER BY created_at, client_order_id"
+        )
+        return [self._stock_order_row_to_dict(row) for row in rows]
+
+    def list_unresolved_recovery(self) -> list[dict[str, Any]]:
+        """Return unresolved/unknown orders from both legacy and M4 tables."""
+        items: list[dict[str, Any]] = []
+        for row in self._fetchall(
+            "SELECT * FROM orders WHERE status = 'NEED_MANUAL_REVIEW' ORDER BY id"
+        ):
+            item = self._row_to_dict(row)
+            items.append({"source": "orders", **item})
+        for row in self._fetchall(
+            "SELECT * FROM stock_orders WHERE status = 'NEED_MANUAL_REVIEW' ORDER BY created_at, client_order_id"
+        ):
+            item = self._stock_order_row_to_dict(row)
+            items.append({"source": "stock_orders", **item})
+        return items
+
+    def resolve_stock_order(
+        self,
+        client_order_id: str,
+        status: str,
+        order_no: str | None = None,
+        trade_date: str | None = None,
+        note: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Manually resolve an unknown M4 stock order."""
+        row = self.get_stock_order(client_order_id)
+        if row is None:
+            return None
+        data = dict(row.get("data") or {})
+        data["need_manual_review"] = False
+        if note:
+            data["resolve_note"] = note
+        self.update_stock_order(
+            client_order_id,
+            status=status,
+            order_no=order_no,
+            trade_date=trade_date,
+            data=data,
+        )
+        return self.get_stock_order(client_order_id)
+
+    def resolve_legacy_order(
+        self,
+        order_no: str,
+        status: str,
+        trade_date: str | None = None,
+        note: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Manually resolve an unknown M3 legacy order by order_no."""
+        rows = self.get_orders(order_no=order_no, trade_date=trade_date)
+        if not rows:
+            return None
+        row = rows[0]
+        data = dict(row.get("data") or {})
+        data["need_manual_review"] = False
+        if note:
+            data["resolve_note"] = note
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE orders SET status = ?, data = ?, created_at = ? WHERE id = ?",
+                (status, _json_dumps(data), _now(), row["id"]),
+            )
+        resolved = self.get_orders(order_no=order_no, trade_date=trade_date)
+        return resolved[0] if resolved else None
 
     # -- helpers -----------------------------------------------------------
 
