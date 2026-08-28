@@ -33,3 +33,12 @@ db_path = "state/yuanta.db"
 timeout = 10.0
 rate_limit_per_second = 3
 rate_limit_per_minute = 600
+
+[risk]
+panic = false
+max_order_qty = 100000
+max_order_amount = 100000000.0
+max_price_deviation_pct = 10.0
+# reference_price = 100.0
+# blacklist = ["2330", "0050"]
+order_timeout = 10.0

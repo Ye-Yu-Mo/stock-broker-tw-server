@@ -33,6 +33,12 @@ def _is_list_like(obj: Any) -> bool:
 
 def status_to_dict(status: Any) -> dict[str, Any]:
     """Serialize a ``Status``-like object (MsgCode/MsgContent/Count)."""
+    if isinstance(status, dict):
+        return {
+            "msg_code": status.get("MsgCode"),
+            "msg_content": status.get("MsgContent"),
+            "count": status.get("Count"),
+        }
     return {
         "msg_code": getattr(status, "MsgCode", None),
         "msg_content": getattr(status, "MsgContent", None),
@@ -205,6 +211,14 @@ def to_dict(obj: Any) -> Any:
         hasattr(obj, "OkQty") and hasattr(obj, "AvgDealPrice")
     ):
         return real_report_merge_to_dict(obj)
+    if "stkorderresult" in name or (
+        hasattr(obj, "ResultCount") and hasattr(obj, "ResultList")
+    ):
+        return stk_order_result_to_dict(obj)
+    if "stkorderdata" in name or (
+        hasattr(obj, "Identify") and hasattr(obj, "ReplyCode") and hasattr(obj, "OrderNO")
+    ):
+        return stk_order_data_to_dict(obj)
     if "realreport" in name or (
         hasattr(obj, "RptType")
         and hasattr(obj, "CompanyNo")
@@ -559,6 +573,27 @@ def real_report_merge_result_to_dict(obj: Any) -> dict[str, Any]:
     return {"real_report_merge_list": to_list(_get_attr(obj, "RealReportMergeList"))}
 
 
+def stk_order_data_to_dict(obj: Any) -> dict[str, Any]:
+    """Serialize a ``StkOrderData`` (SendStockOrder response row) object."""
+    return {
+        "identify": _get_attr(obj, "Identify"),
+        "reply_code": _get_attr(obj, "ReplyCode"),
+        "order_no": _get_attr(obj, "OrderNO"),
+        "trade_date": to_dict(_get_attr(obj, "TradeDate")),
+        "err_type": _get_attr(obj, "ErrType"),
+        "err_no": _get_attr(obj, "ErrNO"),
+        "advisory": _get_attr(obj, "Advisory"),
+    }
+
+
+def stk_order_result_to_dict(obj: Any) -> dict[str, Any]:
+    """Serialize a ``StkOrderResult`` (SendStockOrder response) object."""
+    return {
+        "result_count": status_to_dict(_get_attr(obj, "ResultCount")),
+        "result_list": to_list(_get_attr(obj, "ResultList")),
+    }
+
+
 def stk_order_to_dict(obj: Any) -> dict[str, Any]:
     """Serialize a ``StkOrder`` (domestic stock order) object."""
     return {
@@ -648,6 +683,8 @@ serialize_realized_gain_loss = realized_gain_loss_result_to_dict
 serialize_reversal_report = reversal_report_result_to_dict
 serialize_real_report = real_report_result_to_dict
 serialize_real_report_merge = real_report_merge_result_to_dict
+serialize_stk_order_result = stk_order_result_to_dict
+serialize_stk_order_data = stk_order_data_to_dict
 serialize_order_trade_report = order_trade_report_result_to_dict
 
 

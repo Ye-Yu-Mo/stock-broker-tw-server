@@ -250,9 +250,10 @@ class YuantaAdapter:
             except Exception:
                 pass
 
-        # Query responses are stored separately so ``query()`` does not steal
-        # unrelated events from the shared WebSocket/event queue.
-        if int_mark == 1 and str_index != "Login":
+        # Query/trade responses are stored separately so ``query()`` and
+        # ``send_stock_order()`` do not steal unrelated events from the shared
+        # WebSocket/event queue.
+        if (int_mark == 1 or str_index == "SendStockOrder") and str_index != "Login":
             try:
                 data = to_dict(obj_value)
             except Exception:
@@ -261,6 +262,89 @@ class YuantaAdapter:
                 with self._query_cond:
                     self._query_responses.setdefault(str_index, []).append(data)
                     self._query_cond.notify_all()
+
+    def send_stock_order(
+        self,
+        account: str,
+        orders: Any,
+        timeout: float = 10.0,
+    ) -> Any:
+        """Send one or more domestic stock orders and wait for the response.
+
+        ``orders`` may be a dict or a list of dicts.  When the real .NET
+        assembly is available the dicts are converted to ``StockOrder`` objects;
+        test fakes may receive the plain dict/list.
+        """
+        if self._trader is None:
+            raise YuantaAdapterError("trader is not available")
+        method = getattr(self._trader, "SendStockOrder", None)
+        if not callable(method):
+            raise YuantaAdapterError("unknown Yuanta function: SendStockOrder")
+
+        payload = self._build_stock_order_payload(orders)
+        try:
+            accepted = method(account, payload)
+        except TypeError:
+            # Some bindings/signatures expect a third lng argument.
+            accepted = method(account, payload, 0)
+        except Exception as exc:
+            raise YuantaAdapterError(f"SendStockOrder call failed: {exc}") from exc
+        if not accepted:
+            raise YuantaAdapterError("SendStockOrder was rejected")
+
+        deadline = time.monotonic() + timeout
+        with self._query_cond:
+            while True:
+                responses = self._query_responses.get("SendStockOrder")
+                if responses:
+                    return responses.pop(0)
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"timed out after {timeout:.1f}s waiting for SendStockOrder response")
+                self._query_cond.wait(remaining)
+
+    @staticmethod
+    def _build_stock_order_payload(orders: Any) -> Any:
+        """Convert plain dicts to a .NET ``List[StockOrder]`` when possible."""
+        if isinstance(orders, dict):
+            orders = [orders]
+        elif hasattr(orders, "to_dict") and callable(orders.to_dict):
+            orders = [orders.to_dict()]
+        if isinstance(orders, (list, tuple)):
+            try:
+
+                from System.Collections.Generic import List
+                from YuantaOneAPI import StockOrder
+
+                result = List[StockOrder]()
+                for raw_item in orders:
+                    item = raw_item.to_dict() if hasattr(raw_item, "to_dict") else raw_item
+                    so = StockOrder()
+                    for key, value in item.items():
+                        attr = {
+                            "order_no": "OrderNo",
+                            "trade_date": "TradeDate",
+                            "ap_code": "APCode",
+                            "trade_kind": "TradeKind",
+                            "order_type": "OrderType",
+                            "stk_code": "StkCode",
+                            "buy_sell": "BuySell",
+                            "price_flag": "PriceFlag",
+                            "price": "Price",
+                            "basket_no": "BasketNo",
+                            "order_qty": "OrderQty",
+                            "time_in_force": "Time_in_force",
+                            "identify": "Identify",
+                            "account": "Account",
+                        }.get(str(key), str(key))
+                        if hasattr(so, attr):
+                            setattr(so, attr, value)
+                    result.Add(so)
+                return result
+            except Exception:
+                return list(orders)
+        return orders
 
     def query(
         self,

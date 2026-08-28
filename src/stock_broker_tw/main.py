@@ -13,8 +13,12 @@ from stock_broker_tw.api.http import router as http_router
 from stock_broker_tw.api.ws import ConnectionManager
 from stock_broker_tw.api.ws import router as ws_router
 from stock_broker_tw.audit import AuditLogger, setup_logging
+from stock_broker_tw.broker.service import BrokerService
 from stock_broker_tw.config import Settings, load_settings
+from stock_broker_tw.engine.queue import SerialOrderQueue
+from stock_broker_tw.engine.report_handler import ReportHandler
 from stock_broker_tw.metrics import metrics
+from stock_broker_tw.risk.rules import RiskEngine
 from stock_broker_tw.service.query import QueryService
 from stock_broker_tw.service.session import SessionService
 from stock_broker_tw.state.recovery import run_startup_recovery
@@ -47,10 +51,22 @@ def create_app(
     state_store = StateStore(settings.state.db_path)
     query_service = QueryService(adapter, settings, store=state_store, audit=audit)
     ws_manager = ConnectionManager()
+    risk_engine = RiskEngine(settings)
+    order_queue = SerialOrderQueue()
+    broker_service = BrokerService(
+        adapter,
+        settings,
+        store=state_store,
+        audit=audit,
+        queue=order_queue,
+        risk=risk_engine,
+        broadcaster=ws_manager,
+    )
+    report_handler = ReportHandler(state_store, broadcaster=ws_manager)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        await ws_manager.start(adapter.event_queue)
+        await ws_manager.start(adapter.event_queue, report_handler=report_handler)
         await run_startup_recovery(state_store, query_service, adapter)
         yield
         await ws_manager.stop()
@@ -68,6 +84,10 @@ def create_app(
     app.state.store = state_store
     app.state.query_service = query_service
     app.state.ws_manager = ws_manager
+    app.state.risk_engine = risk_engine
+    app.state.order_queue = order_queue
+    app.state.broker_service = broker_service
+    app.state.report_handler = report_handler
 
     @app.middleware("http")
     async def metrics_middleware(request, call_next):

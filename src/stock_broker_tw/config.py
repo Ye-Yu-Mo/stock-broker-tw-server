@@ -78,6 +78,18 @@ class QueryConfig(BaseModel):
     rate_limit_per_minute: int = 600
 
 
+class RiskConfig(BaseModel):
+    """Trading risk controls."""
+
+    panic: bool = False
+    max_order_qty: int = 100_000
+    max_order_amount: float = 100_000_000.0
+    max_price_deviation_pct: float = 10.0
+    reference_price: float | None = None
+    blacklist: list[str] = []
+    order_timeout: float = 10.0
+
+
 _LEGACY_ENV_MAP: dict[str, dict[str, str]] = {
     "server": {
         "host": "yuanta_host",
@@ -108,6 +120,15 @@ _LEGACY_ENV_MAP: dict[str, dict[str, str]] = {
         "timeout": "yuanta_query_timeout",
         "rate_limit_per_second": "yuanta_query_rate_limit_per_second",
         "rate_limit_per_minute": "yuanta_query_rate_limit_per_minute",
+    },
+    "risk": {
+        "panic": "yuanta_risk_panic",
+        "max_order_qty": "yuanta_risk_max_order_qty",
+        "max_order_amount": "yuanta_risk_max_order_amount",
+        "max_price_deviation_pct": "yuanta_risk_max_price_deviation_pct",
+        "reference_price": "yuanta_risk_reference_price",
+        "blacklist": "yuanta_risk_blacklist",
+        "order_timeout": "yuanta_risk_order_timeout",
     },
 }
 
@@ -161,6 +182,7 @@ class Settings(BaseSettings):
     audit: AuditConfig = AuditConfig()
     state: StateConfig = StateConfig()
     query: QueryConfig = QueryConfig()
+    risk: RiskConfig = RiskConfig()
 
     @classmethod
     def settings_customise_sources(

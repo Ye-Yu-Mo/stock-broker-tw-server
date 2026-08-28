@@ -8,16 +8,38 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from prometheus_client import CONTENT_TYPE_LATEST
+from pydantic import BaseModel, Field
 
 from stock_broker_tw.audit import AuditLogger
+from stock_broker_tw.broker.service import BrokerService, BrokerServiceError
 from stock_broker_tw.config import Settings
+from stock_broker_tw.engine.state import OrderAction
 from stock_broker_tw.metrics import metrics, render_metrics
+from stock_broker_tw.risk.rules import RiskError
 from stock_broker_tw.service.query import QueryError, QueryService
 from stock_broker_tw.service.session import LoginCredentials, SessionError, SessionService
 from stock_broker_tw.yuanta.adapter import YuantaAdapter
 
 router = APIRouter()
 bearer_scheme = HTTPBearer(auto_error=False)
+
+
+class StockOrderPayload(BaseModel):
+    """HTTP body for the unified stock order endpoint."""
+
+    client_order_id: str = Field(..., min_length=1, max_length=64)
+    action: OrderAction = OrderAction.NEW
+    account: str | None = None
+    stk_code: str = ""
+    side: str = "B"
+    price: float | None = None
+    quantity: int = 0
+    time_in_force: str = "ROD"
+    price_flag: str = "LIMIT"
+    order_no: str | None = None
+    trade_date: str | None = None
+    new_price: float | None = None
+    new_quantity: int | None = None
 
 
 def get_settings(request: Request) -> Settings:
@@ -38,6 +60,10 @@ def get_query_service(request: Request) -> QueryService:
 
 def get_audit(request: Request) -> AuditLogger:
     return request.app.state.audit
+
+
+def get_broker_service(request: Request) -> BrokerService:
+    return request.app.state.broker_service
 
 
 def _raise_query_error(exc: QueryError) -> None:
@@ -286,6 +312,56 @@ async def reports_order_trade(
         )
     except QueryError as exc:
         _raise_query_error(exc)
+
+
+@router.post("/api/v1/orders/stock", dependencies=[Depends(require_token)])
+async def submit_stock_order(request: Request, payload: StockOrderPayload) -> dict[str, Any]:
+    service = get_broker_service(request)
+    request_id = request.headers.get("X-Request-ID")
+    data = payload.model_dump()
+    if payload.action == OrderAction.REPLACE:
+        if data.get("new_price") is not None:
+            data["price"] = data["new_price"]
+        if data.get("new_quantity") is not None:
+            data["quantity"] = data["new_quantity"]
+    try:
+        result = await service.submit_stock_order(data, request_id=request_id)
+    except (BrokerServiceError, RiskError) as exc:
+        status_code = exc.status_code if hasattr(exc, "status_code") else 400
+        code = exc.code if hasattr(exc, "code") else "ORDER_ERROR"
+        message = exc.message if hasattr(exc, "message") else str(exc)
+        detail = getattr(exc, "detail", None) or {}
+        raise HTTPException(
+            status_code=status_code,
+            detail={"code": code, "message": message, "detail": detail},
+        ) from exc
+    return ok(result)
+
+
+@router.get("/api/v1/orders", dependencies=[Depends(require_token)])
+async def list_orders(
+    request: Request,
+    account: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    service = get_broker_service(request)
+    return ok(service.list_orders(account=account, status=status))
+
+
+@router.get("/api/v1/orders/{client_order_id}", dependencies=[Depends(require_token)])
+async def get_order(request: Request, client_order_id: str) -> dict[str, Any]:
+    service = get_broker_service(request)
+    order = service.get_order(client_order_id)
+    if order is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "ORDER_NOT_FOUND",
+                "message": "order not found",
+                "detail": {"client_order_id": client_order_id},
+            },
+        )
+    return ok(order)
 
 
 __all__ = ["router"]

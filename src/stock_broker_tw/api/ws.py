@@ -12,6 +12,8 @@ from stock_broker_tw.yuanta.serializer import to_dict
 
 router = APIRouter()
 
+_REPORT_EVENT_TYPES = {"RR_RealReport", "RR_RealReportMerge"}
+
 
 class ConnectionManager:
     """Manage connected WebSocket clients and broadcast adapter events."""
@@ -20,6 +22,7 @@ class ConnectionManager:
         self.active: set[WebSocket] = set()
         self._consumer: AsyncEventConsumer | None = None
         self._task: asyncio.Task[None] | None = None
+        self.report_handler = None
 
     async def connect(self, websocket: WebSocket) -> None:
         await websocket.accept()
@@ -31,9 +34,10 @@ class ConnectionManager:
         self.active.discard(websocket)
         metrics.ws_connections.set(len(self.active))
 
-    async def start(self, event_queue: EventQueue) -> None:
+    async def start(self, event_queue: EventQueue, report_handler=None) -> None:
         if self._consumer is not None:
             return
+        self.report_handler = report_handler
         self._consumer = event_queue.consume(self.broadcast_event)
         await self._consumer.start()
 
@@ -56,6 +60,29 @@ class ConnectionManager:
                 await websocket.send_json(payload)
             except Exception:
                 self.disconnect(websocket)
+
+        # M4: process reports after the raw event is fanned out, preserving the
+        # M2 raw-event behavior while still emitting processed report events.
+        if self.report_handler is not None and event.str_index in _REPORT_EVENT_TYPES:
+            try:
+                handle = self.report_handler.handle_event(event)
+                if asyncio.iscoroutine(handle) or hasattr(handle, "__await__"):
+                    await handle
+            except Exception:
+                # Report processing must not kill the shared event consumer.
+                pass
+
+    async def broadcast_json(self, payload: dict) -> None:
+        """Send an arbitrary JSON object to all connected clients."""
+        for websocket in list(self.active):
+            try:
+                await websocket.send_json(payload)
+            except Exception:
+                self.disconnect(websocket)
+
+    async def broadcast_order_update(self, state: dict) -> None:
+        """Convenience wrapper for order status notifications."""
+        await self.broadcast_json({"type": "order.updated", "data": state})
 
     async def _heartbeat(self, websocket: WebSocket) -> None:
         while True:
@@ -82,7 +109,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     heartbeat_task = asyncio.create_task(manager._heartbeat(websocket))
     try:
         while True:
-            # Keep the connection alive; client messages are ignored in M2.
+            # Keep the connection alive; client messages are ignored in M2/M4.
             await websocket.receive_text()
     except WebSocketDisconnect:
         pass
