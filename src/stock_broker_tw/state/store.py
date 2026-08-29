@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from collections.abc import Iterable
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _FINAL_ORDER_STATUSES = {"10", "20", "24", "25", "30"}
 
@@ -27,6 +30,34 @@ def _json_loads(value: str) -> Any:
         return json.loads(value)
     except (TypeError, ValueError):
         return value
+
+
+def _validate_order_transition(
+    client_order_id: str,
+    current_status: str | None,
+    new_status: str | None,
+) -> None:
+    """Reject status changes that violate the order state machine."""
+    if new_status is None or current_status == new_status:
+        return
+    # Imported lazily to avoid a package-init cycle:
+    # engine/__init__ -> report_handler -> state.store.
+    from stock_broker_tw.engine.state import (
+        InvalidOrderStateTransition,
+        OrderStateMachine,
+    )
+
+    if not OrderStateMachine().can_transition(current_status, new_status):
+        logger.error(
+            "rejected illegal order status transition: client_order_id=%s %s -> %s",
+            client_order_id,
+            current_status,
+            new_status,
+        )
+        raise InvalidOrderStateTransition(
+            f"illegal order transition for {client_order_id}: "
+            f"{current_status} -> {new_status}"
+        )
 
 
 class StateStore:
@@ -318,7 +349,19 @@ class StateStore:
         trade_date: str | None = None,
         data: dict[str, Any] | None = None,
     ) -> None:
-        """Insert a new stock order keyed by ``client_order_id``."""
+        """Insert a new stock order keyed by ``client_order_id``.
+
+        If the key already exists this method refuses to overwrite the row with
+        a status that is not reachable from the current state.  Idempotent
+        writes with the same status are still allowed.
+        """
+        current = self.get_stock_order(client_order_id)
+        if current is not None:
+            _validate_order_transition(
+                client_order_id,
+                current.get("status"),
+                status,
+            )
         request = request or {"client_order_id": client_order_id}
         request_json = _json_dumps(request)
         data_json = _json_dumps(data or {})
@@ -383,10 +426,20 @@ class StateStore:
         account: str | None = None,
         action: str | None = None,
     ) -> None:
-        """Update mutable fields of an existing stock order row."""
+        """Update mutable fields of an existing stock order row.
+
+        A status change is validated against the order state machine before it
+        is persisted; illegal transitions raise
+        :class:`InvalidOrderStateTransition`.
+        """
         current = self.get_stock_order(client_order_id)
         if current is None:
             raise KeyError(f"stock order not found: {client_order_id}")
+        _validate_order_transition(
+            client_order_id,
+            current.get("status"),
+            status,
+        )
         trade_date = _stringify_date(trade_date) if trade_date is not None else None
         with self._connect() as conn:
             conn.execute(

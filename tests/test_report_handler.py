@@ -125,3 +125,18 @@ def test_report_without_local_order_is_persisted_not_crash(tmp_path: Path) -> No
         )
     )
     assert len(store.get_reports("RR_RealReport")) == 1
+
+
+def test_unknown_report_does_not_rollback_final_order(tmp_path: Path) -> None:
+    store, _broadcaster, handler = make_env(tmp_path)
+    _save_order(store, "C001")
+    store.update_stock_order("C001", status="FILLED", data={"filled_qty": 1000})
+    report = {
+        "order_no": "H00001",
+        "basket_no": "C001",
+        "order_status": 99,
+        "ok_qty": 1000,
+        "order_qty": 1000,
+    }
+    run(handler.handle_event(YuantaEvent(2, 0, "RR_RealReport", None, report)))
+    assert store.get_stock_order("C001")["status"] == "FILLED"

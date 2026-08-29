@@ -394,3 +394,40 @@ def test_yuanta_datetime_to_dict() -> None:
         "second": 15,
         "millisecond": 123,
     }
+
+
+def test_to_dict_reflection_failure_includes_placeholder(caplog) -> None:
+    import logging
+
+    class BrokenProp:
+        Name = "CriticalField"
+
+        def GetValue(self, obj, none):
+            raise RuntimeError("boom")
+
+    class BrokenType:
+        def GetProperties(self):
+            return [BrokenProp()]
+
+    class BrokenObject:
+        def GetType(self):
+            return BrokenType()
+
+    with caplog.at_level(logging.WARNING):
+        result = to_dict(BrokenObject())
+    assert result == {"critical_field": None}
+    assert any("CriticalField" in record.message for record in caplog.records)
+
+
+def test_to_dict_python_fallback_failure_includes_placeholder(caplog) -> None:
+    import logging
+
+    class BrokenAttribute:
+        @property
+        def critical_field(self):
+            raise RuntimeError("boom")
+
+    with caplog.at_level(logging.WARNING):
+        result = to_dict(BrokenAttribute())
+    assert result.get("critical_field") is None
+    assert any("critical_field" in record.message for record in caplog.records)

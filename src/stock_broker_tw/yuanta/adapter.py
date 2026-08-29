@@ -20,6 +20,9 @@ class YuantaAdapterError(RuntimeError):
     """Raised when the adapter is used in an invalid lifecycle state."""
 
 
+_UNMATCHED_RESPONSE = ""
+
+
 class YuantaAdapter:
     """Encapsulate Open / Login / LogOut / Close / Dispose.
 
@@ -61,7 +64,7 @@ class YuantaAdapter:
         self._closed = False
         self._disposed = False
         self._last_login_result: dict[str, Any] | None = None
-        self._query_responses: dict[str, list[Any]] = {}
+        self._query_responses: dict[str, dict[str, list[Any]]] = {}
         self._query_cond = threading.Condition()
 
     @property
@@ -230,20 +233,33 @@ class YuantaAdapter:
         obj_handle: Any,
         obj_value: Any,
     ) -> None:
+        # Serialize query/trade payloads before putting the event on the queue
+        # so the event can carry the correlation id used by concurrent waiters.
+        response_id: str | None = None
+        data: Any = None
+        if (int_mark == 1 or str_index == "SendStockOrder") and str_index != "Login":
+            try:
+                data = to_dict(obj_value)
+            except Exception:
+                data = None
+            if data is not None:
+                response_id = self._extract_response_request_id(data)
+
         event = YuantaEvent(
             int_mark=int_mark,
             dw_index=dw_index,
             str_index=str_index,
             obj_handle=obj_handle,
             obj_value=obj_value,
+            request_id=response_id,
         )
         self._event_queue.put(event)
 
         if str_index == "Login":
             try:
-                data = login_result_to_dict(obj_value)
-                self._last_login_result = data
-                if data.get("login_list"):
+                login_data = login_result_to_dict(obj_value)
+                self._last_login_result = login_data
+                if login_data.get("login_list"):
                     self._logged_in = True
                 else:
                     self._logged_in = False
@@ -253,21 +269,80 @@ class YuantaAdapter:
         # Query/trade responses are stored separately so ``query()`` and
         # ``send_stock_order()`` do not steal unrelated events from the shared
         # WebSocket/event queue.
-        if (int_mark == 1 or str_index == "SendStockOrder") and str_index != "Login":
-            try:
-                data = to_dict(obj_value)
-            except Exception:
-                data = None
-            if data is not None:
-                with self._query_cond:
-                    self._query_responses.setdefault(str_index, []).append(data)
-                    self._query_cond.notify_all()
+        if data is not None:
+            with self._query_cond:
+                bucket = self._query_responses.setdefault(str_index, {})
+                key = str(response_id) if response_id is not None else _UNMATCHED_RESPONSE
+                bucket.setdefault(key, []).append(data)
+                self._query_cond.notify_all()
+
+    @staticmethod
+    def _extract_response_request_id(data: Any) -> str | None:
+        """Return the correlation id embedded in a serialized response.
+
+        ``SendStockOrder`` echoes ``Identify``; some test/query payloads use a
+        ``request_id`` key directly.  If neither is present the response is
+        treated as unmatched and kept in the per-function pending bucket.
+        """
+        def _first_id(mapping: dict[str, Any]) -> str | None:
+            for key in ("request_id", "RequestID", "identify", "Identify"):
+                value = mapping.get(key)
+                if value is not None:
+                    return str(value)
+            return None
+
+        if isinstance(data, dict):
+            found = _first_id(data)
+            if found is not None:
+                return found
+            for list_key in ("result_list", "ResultList"):
+                items = data.get(list_key)
+                if isinstance(items, (list, tuple)):
+                    for item in items:
+                        if isinstance(item, dict):
+                            found = _first_id(item)
+                            if found is not None:
+                                return found
+        elif isinstance(data, (list, tuple)):
+            for item in data:
+                if isinstance(item, dict):
+                    found = _first_id(item)
+                    if found is not None:
+                        return found
+        return None
+
+    def _take_response_locked(
+        self,
+        function_name: str,
+        request_id: str | None,
+    ) -> Any | None:
+        bucket = self._query_responses.get(function_name)
+        if not bucket:
+            return None
+        if request_id is not None:
+            key = str(request_id)
+            responses = bucket.get(key)
+            if responses:
+                return responses.pop(0)
+            # If the Yuanta API does not echo a correlation id, fall back to the
+            # unmatched bucket.  QueryService serializes same-function queries,
+            # so this fallback is safe for normal service usage.
+            unmatched = bucket.get(_UNMATCHED_RESPONSE)
+            if unmatched:
+                return unmatched.pop(0)
+            return None
+        responses = bucket.get(_UNMATCHED_RESPONSE)
+        if responses:
+            return responses.pop(0)
+        # A no-request_id caller should not steal request-specific responses.
+        return None
 
     def send_stock_order(
         self,
         account: str,
         orders: Any,
         timeout: float = 10.0,
+        request_id: str | None = None,
     ) -> Any:
         """Send one or more domestic stock orders and wait for the response.
 
@@ -295,13 +370,19 @@ class YuantaAdapter:
         deadline = time.monotonic() + timeout
         with self._query_cond:
             while True:
-                responses = self._query_responses.get("SendStockOrder")
-                if responses:
-                    return responses.pop(0)
+                response = self._take_response_locked(
+                    "SendStockOrder", request_id
+                )
+                if response is not None:
+                    return response
 
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise TimeoutError(f"timed out after {timeout:.1f}s waiting for SendStockOrder response")
+                    request_suffix = f" request_id={request_id}" if request_id else ""
+                    raise TimeoutError(
+                        f"timed out after {timeout:.1f}s waiting for "
+                        f"SendStockOrder response{request_suffix}"
+                    )
                 self._query_cond.wait(remaining)
 
     @staticmethod
@@ -563,9 +644,9 @@ class YuantaAdapter:
         deadline = time.monotonic() + timeout
         with self._query_cond:
             while True:
-                responses = self._query_responses.get(function_name)
-                if responses:
-                    return responses.pop(0)
+                response = self._take_response_locked(function_name, request_id)
+                if response is not None:
+                    return response
 
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:

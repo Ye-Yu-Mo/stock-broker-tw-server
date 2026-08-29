@@ -18,6 +18,7 @@ from stock_broker_tw.audit import AuditLogger
 from stock_broker_tw.config import Settings
 from stock_broker_tw.engine.queue import SerialOrderQueue
 from stock_broker_tw.engine.state import (
+    InvalidOrderStateTransition,
     OrderAction,
     OrderSide,
     OrderStateMachine,
@@ -49,6 +50,15 @@ class BrokerServiceError(Exception):
         self.code = code
         self.status_code = status_code
         self.detail = detail or {}
+
+
+# Yuanta ``SendStockOrder.TradeKind`` field values.  Source:
+# docs/api.md section 5.1 (國內證券下單 / 改量 / 取消 / 改價):
+#   00 = 委託單, 03 = 改量, 04 = 取消, 07 = 改價
+_TRADE_KIND_NEW = 0
+_TRADE_KIND_REPLACE_QTY = 3
+_TRADE_KIND_CANCEL = 4
+_TRADE_KIND_REPLACE_PRICE = 7
 
 
 class BrokerService:
@@ -118,7 +128,7 @@ class BrokerService:
         )
         self._save_pending(req)
         try:
-            await self.queue.submit(req.account, lambda: self._execute_new(req))
+            await self.queue.submit(req.account, lambda: self._execute_new(req, request_id))
         except RiskError:
             raise
         except Exception as exc:
@@ -187,7 +197,7 @@ class BrokerService:
         )
         self._save_pending(req)
         try:
-            await self.queue.submit(req.account, lambda: self._execute_cancel(req))
+            await self.queue.submit(req.account, lambda: self._execute_cancel(req, request_id))
         except Exception as exc:
             if isinstance(exc, BrokerServiceError):
                 self.audit.record(
@@ -256,7 +266,7 @@ class BrokerService:
         )
         self._save_pending(req)
         try:
-            await self.queue.submit(req.account, lambda: self._execute_replace(req))
+            await self.queue.submit(req.account, lambda: self._execute_replace(req, request_id))
         except Exception as exc:
             if isinstance(exc, BrokerServiceError):
                 self.audit.record(
@@ -472,16 +482,32 @@ class BrokerService:
             persisted_data["need_manual_review"] = True
         if error:
             persisted_data["last_error"] = error
-        self.store.update_stock_order(
-            client_order_id,
-            status=final_status,
-            order_no=order_no,
-            trade_date=trade_date,
-            data=persisted_data,
-            request=row.get("request"),
-            account=row.get("account"),
-            action=row.get("action"),
-        )
+        try:
+            self.store.update_stock_order(
+                client_order_id,
+                status=final_status,
+                order_no=order_no,
+                trade_date=trade_date,
+                data=persisted_data,
+                request=row.get("request"),
+                account=row.get("account"),
+                action=row.get("action"),
+            )
+        except InvalidOrderStateTransition:
+            # A late update must not roll back a final order; keep the stored
+            # status and surface the rejection in the order data.
+            final_status = row["status"]
+            persisted_data["last_error"] = "ignored illegal status update"
+            self.store.update_stock_order(
+                client_order_id,
+                status=final_status,
+                order_no=order_no,
+                trade_date=trade_date,
+                data=persisted_data,
+                request=row.get("request"),
+                account=row.get("account"),
+                action=row.get("action"),
+            )
         update_payload = {
             "client_order_id": client_order_id,
             "status": final_status,
@@ -543,9 +569,9 @@ class BrokerService:
             status_code=404,
         )
 
-    async def _execute_new(self, req: StockOrderRequest) -> None:
+    async def _execute_new(self, req: StockOrderRequest, request_id: str | None = None) -> None:
         await self._update_status(req.client_order_id, OrderStatus.SUBMITTED.value, reason="sending to broker")
-        response = await self._call_send(req)
+        response = await self._call_send(req, request_id=request_id)
         result = self._first_result(response)
         if result is None:
             error = self._response_error(response)
@@ -612,9 +638,9 @@ class BrokerService:
         )
         self._save_m3_order(req, order_no, trade_date)
 
-    async def _execute_cancel(self, req: StockOrderRequest) -> None:
+    async def _execute_cancel(self, req: StockOrderRequest, request_id: str | None = None) -> None:
         await self._update_status(req.client_order_id, OrderStatus.SUBMITTED.value, reason="sending cancel")
-        response = await self._call_send(req)
+        response = await self._call_send(req, request_id=request_id)
         result = self._first_result(response)
         if result is None:
             error = self._response_error(response)
@@ -663,9 +689,9 @@ class BrokerService:
             reason="broker accepted cancel request",
         )
 
-    async def _execute_replace(self, req: StockOrderRequest) -> None:
+    async def _execute_replace(self, req: StockOrderRequest, request_id: str | None = None) -> None:
         await self._update_status(req.client_order_id, OrderStatus.SUBMITTED.value, reason="sending replace")
-        response = await self._call_send(req)
+        response = await self._call_send(req, request_id=request_id)
         result = self._first_result(response)
         if result is None:
             error = self._response_error(response)
@@ -714,24 +740,38 @@ class BrokerService:
             reason="broker accepted replace request",
         )
 
-    async def _call_send(self, req: StockOrderRequest) -> Any:
-        order = self._build_order(req)
+    async def _call_send(self, req: StockOrderRequest, request_id: str | None = None) -> Any:
+        order = self._build_order(req, request_id=request_id)
         timeout = getattr(getattr(self.settings, "risk", None), "order_timeout", 10.0)
         try:
             send = getattr(self.adapter, "send_stock_order", None)
             if callable(send):
                 if asyncio.iscoroutinefunction(send):
                     try:
-                        result = await send(req.account, order, timeout=timeout)
+                        if request_id is not None:
+                            result = await send(
+                                req.account, order, timeout=timeout, request_id=request_id
+                            )
+                        else:
+                            result = await send(req.account, order, timeout=timeout)
                     except TypeError:
-                        result = await send(req.account, order)
+                        result = await send(req.account, order, timeout=timeout)
                 else:
                     try:
-                        result = await asyncio.to_thread(
-                            send, req.account, order, timeout=timeout
-                        )
+                        if request_id is not None:
+                            result = await asyncio.to_thread(
+                                send,
+                                req.account,
+                                order,
+                                timeout=timeout,
+                                request_id=request_id,
+                            )
+                        else:
+                            result = await asyncio.to_thread(
+                                send, req.account, order, timeout=timeout
+                            )
                     except TypeError:
-                        result = await asyncio.to_thread(send, req.account, order)
+                        result = await asyncio.to_thread(send, req.account, order, timeout=timeout)
                 if inspect.isawaitable(result):
                     result = await result
             else:
@@ -739,23 +779,44 @@ class BrokerService:
                 if callable(query):
                     if asyncio.iscoroutinefunction(query):
                         try:
+                            if request_id is not None:
+                                result = await query(
+                                    "SendStockOrder",
+                                    req.account,
+                                    [order],
+                                    timeout=timeout,
+                                    request_id=request_id,
+                                )
+                            else:
+                                result = await query(
+                                    "SendStockOrder", req.account, [order], timeout=timeout
+                                )
+                        except TypeError:
                             result = await query(
                                 "SendStockOrder", req.account, [order], timeout=timeout
                             )
-                        except TypeError:
-                            result = await query("SendStockOrder", req.account, [order])
                     else:
                         try:
-                            result = await asyncio.to_thread(
-                                query,
-                                "SendStockOrder",
-                                req.account,
-                                [order],
-                                timeout=timeout,
-                            )
+                            if request_id is not None:
+                                result = await asyncio.to_thread(
+                                    query,
+                                    "SendStockOrder",
+                                    req.account,
+                                    [order],
+                                    timeout=timeout,
+                                    request_id=request_id,
+                                )
+                            else:
+                                result = await asyncio.to_thread(
+                                    query,
+                                    "SendStockOrder",
+                                    req.account,
+                                    [order],
+                                    timeout=timeout,
+                                )
                         except TypeError:
                             result = await asyncio.to_thread(
-                                query, "SendStockOrder", req.account, [order]
+                                query, "SendStockOrder", req.account, [order], timeout=timeout
                             )
                     if inspect.isawaitable(result):
                         result = await result
@@ -780,9 +841,20 @@ class BrokerService:
         self.circuit_breaker.record_success()
         return result
 
-    def _build_order(self, req: StockOrderRequest) -> dict[str, Any]:
+    def _build_order(
+        self,
+        req: StockOrderRequest,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
         return {
-            "identify": req.identify,
+            # Use the caller's request_id as the Yuanta Identify correlation id
+            # when available and no explicit custom Identify was supplied; it is
+            # echoed in SendStockOrder responses.
+            "identify": (
+                request_id
+                if request_id is not None and req.identify == 1
+                else req.identify
+            ),
             "account": req.account or self.settings.account.account,
             "order_no": req.order_no or "",
             "trade_date": self._date_to_str(req.trade_date) or "",
@@ -802,12 +874,13 @@ class BrokerService:
     def _trade_kind(req: StockOrderRequest) -> int:
         action = req.action.value if isinstance(req.action, OrderAction) else str(req.action)
         if action == OrderAction.CANCEL.value:
-            return 4
+            return _TRADE_KIND_CANCEL
         if action == OrderAction.REPLACE.value:
-            # TODO-M4: 03 = 改量, 07 = 改價.  If both fields are present, treat
-            # it as a price change (07) because price is the more specific one.
-            return 7 if req.price is not None else 3
-        return 0
+            # 03 = 改量, 07 = 改價.  If both fields are present, treat it as a
+            # price change (07) because price is the more specific one.
+            # Source: docs/api.md section 5.1 / docs/API/元大API說明文件 43.md.
+            return _TRADE_KIND_REPLACE_PRICE if req.price is not None else _TRADE_KIND_REPLACE_QTY
+        return _TRADE_KIND_NEW
 
     @staticmethod
     def _side_value(side: Any) -> str:

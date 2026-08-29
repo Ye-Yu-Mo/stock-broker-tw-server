@@ -46,3 +46,51 @@ def test_list_stock_orders_filters(tmp_path: Path) -> None:
     assert [r["client_order_id"] for r in store.list_stock_orders()] == ["C1", "C2", "C3"]
     assert [r["client_order_id"] for r in store.list_stock_orders(status="PENDING")] == ["C1", "C3"]
     assert [r["client_order_id"] for r in store.list_stock_orders(account="B")] == ["C3"]
+
+
+import pytest
+
+from stock_broker_tw.engine.state import InvalidOrderStateTransition
+
+
+def test_update_stock_order_rejects_filled_to_pending(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.db")
+    store.save_stock_order(
+        client_order_id="C001",
+        request={"client_order_id": "C001"},
+        status="FILLED",
+        account="S98875005091",
+    )
+    with pytest.raises(InvalidOrderStateTransition):
+        store.update_stock_order("C001", status="PENDING")
+    assert store.get_stock_order("C001")["status"] == "FILLED"
+
+
+def test_save_stock_order_does_not_overwrite_final_status(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.db")
+    store.save_stock_order(
+        client_order_id="C001",
+        request={"client_order_id": "C001"},
+        status="FILLED",
+        account="S98875005091",
+    )
+    with pytest.raises(InvalidOrderStateTransition):
+        store.save_stock_order(
+            client_order_id="C001",
+            request={"client_order_id": "C001"},
+            status="PENDING",
+            account="S98875005091",
+        )
+    assert store.get_stock_order("C001")["status"] == "FILLED"
+
+
+def test_update_stock_order_allows_manual_review_to_final(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.db")
+    store.save_stock_order(
+        client_order_id="C001",
+        request={"client_order_id": "C001"},
+        status="NEED_MANUAL_REVIEW",
+        account="S98875005091",
+    )
+    store.update_stock_order("C001", status="FILLED")
+    assert store.get_stock_order("C001")["status"] == "FILLED"

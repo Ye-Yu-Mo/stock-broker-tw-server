@@ -88,3 +88,41 @@ def test_m1_flat_env_variables_are_supported(monkeypatch) -> None:
     assert settings.account.password == "flat-pass"
     assert settings.yuanta.environment == "PROD"
     assert settings.yuanta.spark_api_dir == "/opt/flat"
+
+
+from stock_broker_tw.config import (
+    QueryConfig,
+    QuoteConfig,
+    RateLimitConfig,
+    Settings,
+    resolve_query_rate_limits,
+    resolve_quote_rate_limits,
+)
+
+
+def test_resolve_query_rate_limits_prefers_legacy_when_new_is_default(tmp_path: Path) -> None:
+    settings = Settings(
+        query=QueryConfig(rate_limit_per_second=7, rate_limit_per_minute=700)
+    )
+    assert resolve_query_rate_limits(settings) == (7, 700)
+
+
+def test_resolve_query_rate_limits_new_unified_wins(tmp_path: Path) -> None:
+    settings = Settings(
+        rate_limit=RateLimitConfig(query_per_second=9, query_per_minute=900),
+        query=QueryConfig(rate_limit_per_second=7, rate_limit_per_minute=700),
+    )
+    assert resolve_query_rate_limits(settings) == (9, 900)
+
+
+def test_resolve_quote_rate_limits_prefers_legacy_when_new_is_default(tmp_path: Path) -> None:
+    settings = Settings(quote=QuoteConfig(rate_limit_per_second=8))
+    assert resolve_quote_rate_limits(settings) == (8, None)
+
+
+def test_resolve_quote_rate_limits_new_unified_wins(tmp_path: Path) -> None:
+    settings = Settings(
+        rate_limit=RateLimitConfig(quote_per_second=12, quote_per_minute=1200),
+        quote=QuoteConfig(rate_limit_per_second=8),
+    )
+    assert resolve_quote_rate_limits(settings) == (12, 1200)

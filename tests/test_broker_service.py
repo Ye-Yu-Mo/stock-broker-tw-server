@@ -237,3 +237,95 @@ def test_cancel_missing_order_no_raises(tmp_path: Path) -> None:
         run(service.cancel_stock_order(cancel_req))
     assert exc_info.value.code == "ORDER_NOT_FOUND"
     assert adapter.calls == []
+
+
+def test_trade_kind_constants_match_yuanta_docs(tmp_path: Path) -> None:
+    service, _adapter, _store, _ = make_env(tmp_path)
+    cancel = StockOrderRequest.from_dict(
+        {
+            "client_order_id": "C_CANCEL",
+            "action": "cancel",
+            "account": "S98875005091",
+            "order_no": "H00001",
+            "stk_code": "2330",
+        }
+    )
+    assert service._trade_kind(cancel) == 4
+
+    replace_qty = StockOrderRequest.from_dict(
+        {
+            "client_order_id": "C_QTY",
+            "action": "replace",
+            "account": "S98875005091",
+            "order_no": "H00001",
+            "stk_code": "2330",
+            "quantity": 20,
+            "price": None,
+        }
+    )
+    assert service._trade_kind(replace_qty) == 3
+
+    replace_price = StockOrderRequest.from_dict(
+        {
+            "client_order_id": "C_PRICE",
+            "action": "replace",
+            "account": "S98875005091",
+            "order_no": "H00001",
+            "stk_code": "2330",
+            "price": 510.0,
+        }
+    )
+    assert service._trade_kind(replace_price) == 7
+
+
+def test_send_passes_request_id_as_identify(tmp_path: Path) -> None:
+    service, adapter, _store, _ = make_env(tmp_path)
+    req = StockOrderRequest.from_dict(
+        {
+            "client_order_id": "C_REQ",
+            "account": "S98875005091",
+            "stk_code": "2330",
+            "side": "B",
+            "price": 500.0,
+            "quantity": 10,
+        }
+    )
+    run(service.place_stock_order(req, request_id="REQ-123"))
+    call = adapter.calls[-1]
+    assert call["order"]["identify"] == "REQ-123"
+
+
+class RequestIdFakeAdapter(FakeAdapter):
+    def send_stock_order(self, account: str, order: dict, timeout: float = 10.0, request_id: str | None = None):
+        self.calls.append({"account": account, "order": order, "request_id": request_id})
+        return {
+            "result_count": {"msg_code": "0001", "msg_content": "ok", "count": 1},
+            "result_list": [
+                {
+                    "identify": order.get("identify", 1),
+                    "reply_code": 0,
+                    "order_no": "H00001",
+                    "trade_date": "2026/08/28",
+                    "err_type": "",
+                    "err_no": "",
+                    "advisory": "",
+                }
+            ],
+        }
+
+
+def test_send_forwards_request_id_to_adapter(tmp_path: Path) -> None:
+    adapter = RequestIdFakeAdapter()
+    service, _adapter, _store, _ = make_env(tmp_path, adapter)
+    req = StockOrderRequest.from_dict(
+        {
+            "client_order_id": "C_REQ2",
+            "account": "S98875005091",
+            "stk_code": "2330",
+            "side": "B",
+            "price": 500.0,
+            "quantity": 10,
+        }
+    )
+    run(service.place_stock_order(req, request_id="REQ-456"))
+    assert adapter.calls[-1]["request_id"] == "REQ-456"

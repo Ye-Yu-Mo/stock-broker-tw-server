@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from stock_broker_tw.engine.state import (
+    InvalidOrderStateTransition,
     OrderStateMachine,
     OrderStatus,
     StockOrderState,
@@ -31,6 +32,28 @@ _M3_STATUS = {
     "FAILED": "24",
     "NEED_MANUAL_REVIEW": "0",
 }
+
+# Status code sources:
+# - docs/API/元大API說明文件 43.md and 44.md: RR_RealReport
+#   OrderStatus = 0 委託成功, 1 委託失敗, 2 取消成功, 3 取消失敗,
+#   4 減量成功, 5 減量失敗, 6 查詢成功, 7 查詢失敗, 8 已成交,
+#   18 委託收到, 20 改價成功, 21 改價失敗, 23 取消成交, 24 委託失效,
+#   25 價穩失效
+# - docs/API/元大API說明文件 45.md and 46.md: RR_RealReportMerge
+#   LastOrderStatus additionally uses 10 組合成功, 11 拆解成功, etc.
+_REAL_REPORT_CANCEL_STATUSES = frozenset({2, 23, 30})
+_REAL_REPORT_REJECT_STATUSES = frozenset({1, 3, 5, 7, 10, 21})
+_REAL_REPORT_FAIL_STATUSES = frozenset({24, 25})
+_REAL_REPORT_FILL_ANY_STATUSES = frozenset({8})
+_REAL_REPORT_FILL_STATUSES = frozenset({0, 4, 6, 18, 20})
+
+_MERGE_CANCEL_STATUSES = frozenset({2, 23, 30})
+_MERGE_DIRECT_REJECT_STATUSES = frozenset({10})
+_MERGE_LAST_REJECT_STATUSES = frozenset({1, 3, 5, 7, 21})
+_MERGE_FAIL_STATUSES = frozenset({24, 25})
+_MERGE_FILL_ANY_STATUSES = frozenset({8})
+_MERGE_FILL_STATUSES = frozenset({20})
+_MERGE_SUBMITTED_STATUSES = frozenset({0})
 
 
 class ReportHandler:
@@ -122,16 +145,21 @@ class ReportHandler:
         if final_status == OrderStatus.NEED_MANUAL_REVIEW.value:
             data["last_error"] = "unknown report status"
             data["need_manual_review"] = True
-        self.store.update_stock_order(
-            row["client_order_id"],
-            status=final_status,
-            order_no=row.get("order_no") or order_no,
-            trade_date=row_trade_date,
-            data=data,
-            request=row.get("request"),
-            account=row.get("account"),
-            action=row.get("action"),
-        )
+        try:
+            self.store.update_stock_order(
+                row["client_order_id"],
+                status=final_status,
+                order_no=row.get("order_no") or order_no,
+                trade_date=row_trade_date,
+                data=data,
+                request=row.get("request"),
+                account=row.get("account"),
+                action=row.get("action"),
+            )
+        except InvalidOrderStateTransition:
+            # Never let a late/unknown report roll back a final order state.
+            final_status = row["status"]
+            data["last_error"] = "ignored illegal report status transition"
         # If several local client_order_id rows map to the same broker OrderNo
         # (e.g. an original order plus a cancel/replace operation), keep them all
         # in sync so any client_order_id lookup sees the latest report status.
@@ -228,38 +256,37 @@ class ReportHandler:
             return OrderStatus.ACCEPTED
 
         # RR_RealReport uses its own status codes; RR_RealReportMerge uses the
-        # merged order status codes.  Keep both mappings explicit.
+        # merged order status codes.  Both mappings are table-driven using the
+        # constants above, with sources cited in the module docstring.
         if report_type == "real_report":
-            # 2=取消成功, 23=取消成交, 30=取消成功(merge style fallback)
-            if order_status in {2, 23, 30}:
+            if order_status in _REAL_REPORT_CANCEL_STATUSES:
                 return OrderStatus.CANCELLED
-            # 1=委託失敗, 3=取消失敗, 5=減量失敗, 7=查詢失敗, 21=改價失敗
-            if order_status in {1, 3, 5, 7, 10, 21}:
+            if order_status in _REAL_REPORT_REJECT_STATUSES:
                 return OrderStatus.REJECTED
-            if order_status in {24, 25}:
+            if order_status in _REAL_REPORT_FAIL_STATUSES:
                 return OrderStatus.FAILED
-            if order_status == 8 or last_status == 8:
+            if order_status in _REAL_REPORT_FILL_ANY_STATUSES or last_status in _REAL_REPORT_FILL_ANY_STATUSES:
                 return fill_status()
-            if order_status in {0, 4, 6, 18, 20}:
+            if order_status in _REAL_REPORT_FILL_STATUSES:
                 return fill_status()
             return None
 
         # RR_RealReportMerge / default mapping.
-        if order_status in {2, 23, 30}:
+        if order_status in _MERGE_CANCEL_STATUSES:
             return OrderStatus.CANCELLED
-        if order_status == 10:
+        if order_status in _MERGE_DIRECT_REJECT_STATUSES:
             return OrderStatus.REJECTED
-        if order_status in {24, 25}:
+        if order_status in _MERGE_FAIL_STATUSES:
             return OrderStatus.FAILED
-        if last_status == 8 or order_status == 8:
+        if order_status in _MERGE_FILL_ANY_STATUSES or last_status in _MERGE_FILL_ANY_STATUSES:
             return fill_status()
         if last_status == 2:
             return OrderStatus.CANCELLED
-        if last_status in {1, 3, 5, 7, 21}:
+        if last_status in _MERGE_LAST_REJECT_STATUSES:
             return OrderStatus.REJECTED
-        if order_status == 20:
+        if order_status in _MERGE_FILL_STATUSES:
             return fill_status()
-        if order_status == 0:
+        if order_status in _MERGE_SUBMITTED_STATUSES:
             return OrderStatus.SUBMITTED
         return None
 

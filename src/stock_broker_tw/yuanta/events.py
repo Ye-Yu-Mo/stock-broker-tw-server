@@ -35,6 +35,7 @@ class YuantaEvent:
     str_index: str
     obj_handle: Any
     obj_value: Any
+    request_id: str | None = None
 
     @property
     def intMark(self) -> int:

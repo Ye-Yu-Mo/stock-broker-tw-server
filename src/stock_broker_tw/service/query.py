@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from stock_broker_tw.audit import AuditLogger
-from stock_broker_tw.config import Settings
+from stock_broker_tw.config import Settings, resolve_query_rate_limits
 from stock_broker_tw.metrics import metrics
 from stock_broker_tw.risk.circuit_breaker import CircuitBreaker
 from stock_broker_tw.risk.rate_limit import RateLimiter
@@ -48,16 +48,12 @@ class QueryService:
         self.settings = settings
         self.store = store or state_store or StateStore(settings.state.db_path)
         self.state_store = self.store
-        query_per_second = settings.rate_limit.query_per_second
-        query_per_minute = settings.rate_limit.query_per_minute
-        if query_per_second == 3 and settings.query.rate_limit_per_second != 3:
-            query_per_second = settings.query.rate_limit_per_second
-        if query_per_minute == 600 and settings.query.rate_limit_per_minute != 600:
-            query_per_minute = settings.query.rate_limit_per_minute
+        query_per_second, query_per_minute = resolve_query_rate_limits(settings)
         self.rate_limiter = rate_limiter or RateLimiter(
             max_per_second=query_per_second,
             max_per_minute=query_per_minute,
         )
+        self._query_locks: dict[str, asyncio.Lock] = {}
         self.audit = audit or AuditLogger(
             enabled=settings.audit.enabled,
             file_path=settings.audit.file,
@@ -417,21 +413,32 @@ class QueryService:
 
             async def _run_query() -> Any:
                 try:
+                    if request_id is not None:
+                        if asyncio.iscoroutinefunction(query_method):
+                            return await query_method(
+                                function_name, request_id=request_id, **params
+                            )
+                        return await asyncio.to_thread(
+                            query_method, function_name, request_id=request_id, **params
+                        )
                     if asyncio.iscoroutinefunction(query_method):
                         return await query_method(function_name, **params)
                     return await asyncio.to_thread(query_method, function_name, **params)
                 except TypeError:
-                    # Some fake/legacy query methods only accept positional args.
+                    # Some fake/legacy query methods do not accept request_id or
+                    # only accept positional args.
                     if asyncio.iscoroutinefunction(query_method):
                         return await query_method(function_name, *params.values())
                     return await asyncio.to_thread(
                         query_method, function_name, *params.values()
                     )
 
-            result = await asyncio.wait_for(
-                _run_query(),
-                timeout=self.settings.query.timeout,
-            )
+            lock = self._query_locks.setdefault(function_name, asyncio.Lock())
+            async with lock:
+                result = await asyncio.wait_for(
+                    _run_query(),
+                    timeout=self.settings.query.timeout,
+                )
         except TimeoutError as exc:
             if self.circuit_breaker is not None:
                 self.circuit_breaker.record_failure(exc)

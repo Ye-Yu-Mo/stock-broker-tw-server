@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import ClassVar
 
 import pytest
@@ -197,3 +199,152 @@ def test_query_retries_positionally_when_trader_rejects_keywords() -> None:
     result = adapter.query("GetStoreSummary", Account="S98875005091", timeout=1)
     assert result == {"stk_store_list": [], "ov_stk_store_list": []}
     assert trader.args == ("S98875005091",)
+
+
+class FakeQueryConcurrentTrader(FakeTrader):
+    """Returns True from the query call without emitting a response.
+
+    Tests control response arrival explicitly through ``adapter._on_response``
+    so they can simulate out-of-order / concurrent callbacks.
+    """
+
+    def GetStoreSummary(self, Account=None, **kwargs):
+        return True
+
+
+def test_query_waits_only_for_its_own_request_id() -> None:
+    trader = FakeQueryConcurrentTrader()
+    adapter = YuantaAdapter(trader=trader)
+    adapter.open()
+
+    results: dict[str, object] = {}
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(3)
+
+    def run_query(request_id: str) -> None:
+        barrier.wait()
+        try:
+            results[request_id] = adapter.query(
+                "GetStoreSummary", request_id=request_id, timeout=2
+            )
+        except BaseException as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=run_query, args=("A",)),
+        threading.Thread(target=run_query, args=("B",)),
+    ]
+    for t in threads:
+        t.start()
+    barrier.wait()
+    # Give both queries time to enter the condition wait before feeding responses.
+    time.sleep(0.05)
+    adapter._on_response(1, 0, "GetStoreSummary", None, {"request_id": "B", "data": "B"})
+    adapter._on_response(1, 0, "GetStoreSummary", None, {"request_id": "A", "data": "A"})
+    for t in threads:
+        t.join(timeout=3)
+    assert not errors
+    assert results == {"A": {"request_id": "A", "data": "A"}, "B": {"request_id": "B", "data": "B"}}
+
+
+def test_timeout_request_does_not_consume_other_request_response() -> None:
+    trader = FakeQueryConcurrentTrader()
+    adapter = YuantaAdapter(trader=trader)
+    adapter.open()
+
+    barrier = threading.Barrier(2)
+    holder: dict[str, object] = {}
+    errors: list[BaseException] = []
+
+    def run_query() -> None:
+        barrier.wait()
+        try:
+            holder["result"] = adapter.query(
+                "GetStoreSummary", request_id="A", timeout=0.1
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    t = threading.Thread(target=run_query)
+    t.start()
+    barrier.wait()
+    time.sleep(0.02)
+    adapter._on_response(1, 0, "GetStoreSummary", None, {"request_id": "B", "data": "B"})
+    t.join(timeout=1)
+    assert errors and isinstance(errors[0], TimeoutError)
+    assert "result" not in holder
+
+    result = adapter.query("GetStoreSummary", request_id="B", timeout=1)
+    assert result == {"request_id": "B", "data": "B"}
+
+
+class FakeSendOrderTrader(FakeTrader):
+    def SendStockOrder(self, account, payload):
+        return True
+
+
+def test_send_stock_order_matches_by_request_id_identify() -> None:
+    trader = FakeSendOrderTrader()
+    adapter = YuantaAdapter(trader=trader)
+    adapter.open()
+
+    barrier = threading.Barrier(2)
+    holder: dict[str, object] = {}
+    errors: list[BaseException] = []
+
+    def run_send() -> None:
+        barrier.wait()
+        try:
+            holder["result"] = adapter.send_stock_order(
+                "S98875005091",
+                {"identify": "order-1", "stk_code": "2330"},
+                request_id="order-1",
+                timeout=2,
+            )
+        except BaseException as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    t = threading.Thread(target=run_send)
+    t.start()
+    barrier.wait()
+    time.sleep(0.02)
+    adapter._on_response(
+        1,
+        0,
+        "SendStockOrder",
+        None,
+        {"result_list": [{"identify": "order-1", "reply_code": 0, "order_no": "H00001"}]},
+    )
+    t.join(timeout=3)
+    assert not errors
+    assert holder["result"]["result_list"][0]["order_no"] == "H00001"
+
+
+def test_request_id_waiter_falls_back_to_unmatched_response() -> None:
+    trader = FakeQueryConcurrentTrader()
+    adapter = YuantaAdapter(trader=trader)
+    adapter.open()
+
+    barrier = threading.Barrier(2)
+    holder: dict[str, object] = {}
+    errors: list[BaseException] = []
+
+    def run_query() -> None:
+        barrier.wait()
+        try:
+            holder["result"] = adapter.query(
+                "GetStoreSummary", request_id="A", timeout=1
+            )
+        except BaseException as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    t = threading.Thread(target=run_query)
+    t.start()
+    barrier.wait()
+    time.sleep(0.02)
+    # Real Yuanta query responses may not echo request_id; they should still be
+    # consumable when QueryService serializes same-function queries.
+    adapter._on_response(1, 0, "GetStoreSummary", None, {"stk_code": "2330"})
+    t.join(timeout=2)
+    assert not errors
+    assert holder["result"] == {"stk_code": "2330"}

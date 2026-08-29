@@ -7,9 +7,12 @@ JSON-friendly structures.
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import date, datetime
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def _snake(name: str) -> str:
@@ -346,7 +349,14 @@ def to_dict(obj: Any) -> Any:
                     continue
                 try:
                     value = prop.GetValue(obj, None)
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to serialize property %s on %s: %s",
+                        prop_name,
+                        name,
+                        exc,
+                    )
+                    result[_snake(prop_name)] = None
                     continue
                 result[_snake(prop_name)] = to_dict(value)
             if result:
@@ -361,7 +371,14 @@ def to_dict(obj: Any) -> Any:
             continue
         try:
             value = getattr(obj, attr)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "Failed to serialize attribute %s on %s: %s",
+                attr,
+                name,
+                exc,
+            )
+            result[_snake(attr)] = None
             continue
         if callable(value):
             continue

@@ -14,7 +14,12 @@ from stock_broker_tw.api.ws import ConnectionManager
 from stock_broker_tw.api.ws import router as ws_router
 from stock_broker_tw.audit import AuditLogger, setup_logging
 from stock_broker_tw.broker.service import BrokerService
-from stock_broker_tw.config import Settings, load_settings
+from stock_broker_tw.config import (
+    Settings,
+    load_settings,
+    resolve_query_rate_limits,
+    resolve_quote_rate_limits,
+)
 from stock_broker_tw.engine.queue import SerialOrderQueue
 from stock_broker_tw.engine.report_handler import ReportHandler
 from stock_broker_tw.metrics import metrics
@@ -56,12 +61,8 @@ def create_app(
     state_store = StateStore(settings.state.db_path)
     # Keep M3/M4 explicit query/quote rate settings working while still
     # allowing the unified rate_limit block to override them.
-    query_per_second = settings.rate_limit.query_per_second
-    query_per_minute = settings.rate_limit.query_per_minute
-    if query_per_second == 3 and settings.query.rate_limit_per_second != 3:
-        query_per_second = settings.query.rate_limit_per_second
-    if query_per_minute == 600 and settings.query.rate_limit_per_minute != 600:
-        query_per_minute = settings.query.rate_limit_per_minute
+    query_per_second, query_per_minute = resolve_query_rate_limits(settings)
+    quote_per_second, quote_per_minute = resolve_quote_rate_limits(settings)
     rate_limiter = RateLimiter(
         max_per_second=query_per_second,
         max_per_minute=query_per_minute,
@@ -70,54 +71,18 @@ def create_app(
                 settings.rate_limit.trade_per_second,
                 settings.rate_limit.trade_per_minute,
             ),
-            "SubscribeWatchlist": (
-                settings.rate_limit.quote_per_second,
-                settings.rate_limit.quote_per_minute,
-            ),
-            "UnSubscribeWatchlist": (
-                settings.rate_limit.quote_per_second,
-                settings.rate_limit.quote_per_minute,
-            ),
-            "SubscribeWatchlistAll": (
-                settings.rate_limit.quote_per_second,
-                settings.rate_limit.quote_per_minute,
-            ),
-            "UnSubscribeWatchlistAll": (
-                settings.rate_limit.quote_per_second,
-                settings.rate_limit.quote_per_minute,
-            ),
-            "SubscribeFiveTickA": (
-                settings.rate_limit.quote_per_second,
-                settings.rate_limit.quote_per_minute,
-            ),
-            "UnSubscribeFiveTickA": (
-                settings.rate_limit.quote_per_second,
-                settings.rate_limit.quote_per_minute,
-            ),
-            "SubscribeStockTick": (
-                settings.rate_limit.quote_per_second,
-                settings.rate_limit.quote_per_minute,
-            ),
-            "UnSubscribeStockTick": (
-                settings.rate_limit.quote_per_second,
-                settings.rate_limit.quote_per_minute,
-            ),
-            "SubscribeMarketInformation": (
-                settings.rate_limit.quote_per_second,
-                settings.rate_limit.quote_per_minute,
-            ),
-            "UnSubscribeMarketInformation": (
-                settings.rate_limit.quote_per_second,
-                settings.rate_limit.quote_per_minute,
-            ),
-            "SubscribeStockInformation": (
-                settings.rate_limit.quote_per_second,
-                settings.rate_limit.quote_per_minute,
-            ),
-            "UnSubscribeStockInformation": (
-                settings.rate_limit.quote_per_second,
-                settings.rate_limit.quote_per_minute,
-            ),
+            "SubscribeWatchlist": (quote_per_second, quote_per_minute),
+            "UnSubscribeWatchlist": (quote_per_second, quote_per_minute),
+            "SubscribeWatchlistAll": (quote_per_second, quote_per_minute),
+            "UnSubscribeWatchlistAll": (quote_per_second, quote_per_minute),
+            "SubscribeFiveTickA": (quote_per_second, quote_per_minute),
+            "UnSubscribeFiveTickA": (quote_per_second, quote_per_minute),
+            "SubscribeStockTick": (quote_per_second, quote_per_minute),
+            "UnSubscribeStockTick": (quote_per_second, quote_per_minute),
+            "SubscribeMarketInformation": (quote_per_second, quote_per_minute),
+            "UnSubscribeMarketInformation": (quote_per_second, quote_per_minute),
+            "SubscribeStockInformation": (quote_per_second, quote_per_minute),
+            "UnSubscribeStockInformation": (quote_per_second, quote_per_minute),
         },
     )
     ws_manager = ConnectionManager()

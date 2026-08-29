@@ -295,6 +295,49 @@ class Settings(BaseSettings):
         )
 
 
+def resolve_query_rate_limits(settings: Settings) -> tuple[int, int | None]:
+    """Resolve query rate limits from unified and legacy config blocks.
+
+    The unified ``[rate_limit]`` block wins whenever its value differs from the
+    default.  If it is left at the default, the older ``[query]`` values are
+    used so existing deployments do not silently change behaviour.
+    """
+    unified_second = settings.rate_limit.query_per_second
+    unified_minute = settings.rate_limit.query_per_minute
+    legacy_second = settings.query.rate_limit_per_second
+    legacy_minute = settings.query.rate_limit_per_minute
+
+    per_second = (
+        unified_second
+        if unified_second != QueryConfig.model_fields["rate_limit_per_second"].default
+        else legacy_second
+    )
+    per_minute = (
+        unified_minute
+        if unified_minute != QueryConfig.model_fields["rate_limit_per_minute"].default
+        else legacy_minute
+    )
+    return per_second, per_minute
+
+
+def resolve_quote_rate_limits(settings: Settings) -> tuple[int, int | None]:
+    """Resolve quote rate limits from unified and legacy config blocks.
+
+    Legacy ``[quote]`` only has ``rate_limit_per_second``; per-minute limits come
+    from the unified ``[rate_limit]`` block.
+    """
+    unified_second = settings.rate_limit.quote_per_second
+    unified_minute = settings.rate_limit.quote_per_minute
+    legacy_second = settings.quote.rate_limit_per_second
+
+    per_second = (
+        unified_second
+        if unified_second != QuoteConfig.model_fields["rate_limit_per_second"].default
+        else legacy_second
+    )
+    return per_second, unified_minute
+
+
 def load_settings(config_path: str | Path | None = None) -> Settings:
     """Load settings from a TOML file plus environment variables.
 

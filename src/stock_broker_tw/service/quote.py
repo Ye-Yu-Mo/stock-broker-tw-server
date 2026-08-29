@@ -13,7 +13,7 @@ from typing import Any
 
 from stock_broker_tw.audit import AuditLogger
 from stock_broker_tw.broker.quote import QuoteType, SubscribeRequest
-from stock_broker_tw.config import Settings
+from stock_broker_tw.config import Settings, resolve_quote_rate_limits
 from stock_broker_tw.metrics import metrics
 from stock_broker_tw.risk.circuit_breaker import CircuitBreaker
 from stock_broker_tw.risk.rate_limit import RateLimiter
@@ -54,10 +54,7 @@ class QuoteService:
         self.settings = settings
         self.store = store or state_store or StateStore(settings.state.db_path)
         self.state_store = self.store
-        quote_per_second = settings.rate_limit.quote_per_second
-        quote_per_minute = settings.rate_limit.quote_per_minute
-        if quote_per_second == 10 and settings.quote.rate_limit_per_second != 10:
-            quote_per_second = settings.quote.rate_limit_per_second
+        quote_per_second, quote_per_minute = resolve_quote_rate_limits(settings)
         self.rate_limiter = rate_limiter or RateLimiter(
             max_per_second=quote_per_second,
             max_per_minute=quote_per_minute,

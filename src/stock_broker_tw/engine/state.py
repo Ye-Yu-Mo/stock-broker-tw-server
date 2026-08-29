@@ -255,6 +255,7 @@ class InvalidOrderStateTransition(Exception):
 _TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
     OrderStatus.PENDING: {
         OrderStatus.SUBMITTED,
+        OrderStatus.ACCEPTED,
         OrderStatus.REJECTED,
         OrderStatus.FAILED,
     },
@@ -287,7 +288,17 @@ _TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
     OrderStatus.CANCELLED: set(),
     OrderStatus.REJECTED: set(),
     OrderStatus.FAILED: set(),
-    OrderStatus.NEED_MANUAL_REVIEW: set(),
+    OrderStatus.NEED_MANUAL_REVIEW: {
+        OrderStatus.PENDING,
+        OrderStatus.SUBMITTED,
+        OrderStatus.ACCEPTED,
+        OrderStatus.PARTIALLY_FILLED,
+        OrderStatus.FILLED,
+        OrderStatus.CANCELLED,
+        OrderStatus.REJECTED,
+        OrderStatus.FAILED,
+        OrderStatus.NEED_MANUAL_REVIEW,
+    },
 }
 
 
@@ -303,6 +314,8 @@ class OrderStateMachine:
         target_enum = _coerce_enum(OrderStatus, target, None)
         if current_enum is None or target_enum is None:
             return False
+        if current_enum == target_enum:
+            return True
         return target_enum in _TRANSITIONS.get(current_enum, set())
 
     def transition(

@@ -116,3 +116,12 @@ def test_rate_limit_maps_to_429(tmp_path: Path) -> None:
         run(service.positions())
     assert exc_info.value.status_code == 429
     assert exc_info.value.code == "RATE_LIMITED"
+
+
+def test_query_passes_request_id_to_adapter(tmp_path: Path) -> None:
+    service, adapter = make_service(tmp_path)
+    run(service.positions(request_id="REQ-1"))
+    assert adapter.calls[-1] == (
+        "GetStoreSummary",
+        {"Account": "S98875005091", "request_id": "REQ-1"},
+    )
