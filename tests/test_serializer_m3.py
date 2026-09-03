@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import ClassVar
 
 from stock_broker_tw.yuanta.serializer import (
@@ -90,6 +91,20 @@ class FakeStoreSummaryResult:
     OVStkStoreList: ClassVar[list[FakeOVStkStore]] = [FakeOVStkStore()]
 
 
+class FakeMarketType:
+    def __str__(self) -> str:
+        return "TWSE"
+
+
+class FakeStkStoreWithEnum(FakeStkStore):
+    MarketNo = FakeMarketType()
+
+
+class FakeStoreSummaryResultWithEnum:
+    StkStoreList: ClassVar[list[FakeStkStore]] = [FakeStkStoreWithEnum()]
+    OVStkStoreList: ClassVar[list[FakeOVStkStore]] = []
+
+
 class FakeBankBalance:
     Account = "S98875005091"
     ResponseTime = "10:30:15"
@@ -150,6 +165,14 @@ class FakeRealizedGainLoss:
 
 class FakeRealizedGainLossResult:
     RealizedGainLossList: ClassVar[list[FakeRealizedGainLoss]] = [FakeRealizedGainLoss()]
+
+
+class FakeRealizedGainLossWithEnum(FakeRealizedGainLoss):
+    MarketNo = FakeMarketType()
+
+
+class FakeRealizedGainLossResultWithEnum:
+    RealizedGainLossList: ClassVar[list[FakeRealizedGainLoss]] = [FakeRealizedGainLossWithEnum()]
 
 
 class FakeReversalReport:
@@ -431,3 +454,20 @@ def test_to_dict_python_fallback_failure_includes_placeholder(caplog) -> None:
         result = to_dict(BrokenAttribute())
     assert result.get("critical_field") is None
     assert any("critical_field" in record.message for record in caplog.records)
+
+
+def test_m3_market_no_enum_values_are_json_safe() -> None:
+    cases = [
+        (
+            store_summary_result_to_dict(FakeStoreSummaryResultWithEnum()),
+            lambda data: data["stk_store_list"][0]["market_no"],
+        ),
+        (
+            realized_gain_loss_result_to_dict(FakeRealizedGainLossResultWithEnum()),
+            lambda data: data["realized_gain_loss_list"][0]["market_no"],
+        ),
+    ]
+
+    for data, get_market_no in cases:
+        assert get_market_no(data) == "TWSE"
+        json.dumps(data)

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
+import types
 from typing import ClassVar
 
 import pytest
@@ -348,3 +350,86 @@ def test_request_id_waiter_falls_back_to_unmatched_response() -> None:
     t.join(timeout=2)
     assert not errors
     assert holder["result"] == {"stk_code": "2330"}
+
+
+class FakeMarketType:
+    def __str__(self) -> str:
+        return "TWSE"
+
+
+class FakeStkStore:
+    MarketNo = FakeMarketType()
+
+
+class FakeStoreResultWithHolding:
+    StkStoreList: ClassVar[list[FakeStkStore]] = [FakeStkStore()]
+    OVStkStoreList: ClassVar[list] = []
+
+
+class FakeHoldingQueryTrader(FakeQueryTrader):
+    def GetStoreSummary(self, Account=None, **kwargs):
+        if self.on_response is not None:
+            self.on_response(1, 0, "GetStoreSummary", None, FakeStoreResultWithHolding())
+        return True
+
+
+def test_query_serializes_store_summary_market_enum() -> None:
+    trader = FakeHoldingQueryTrader()
+    adapter = YuantaAdapter(trader=trader)
+    trader.on_response = adapter._on_response
+    adapter.open()
+
+    result = adapter.query("GetStoreSummary", Account="S98875005091", timeout=1)
+
+    assert result["stk_store_list"][0]["market_no"] == "TWSE"
+
+
+class FakeRealizedGainLoss:
+    Account = None
+    MarketNo = None
+    StkCode = None
+    TradeDate = None
+    TradeKind = None
+    Price = None
+    Qty = None
+    ProfitLoss = None
+    OrderNo = None
+    TermSplit = None
+    TermExt = None
+    Charge = None
+    Cost = None
+    Tax = None
+    TotalAMT = None
+
+
+class FakeEnumMarketType:
+    TWSE = "enum-twse"
+
+
+def test_reversal_dict_is_converted_to_typed_object(monkeypatch) -> None:
+    yuanta_module = types.ModuleType("YuantaOneAPI")
+    yuanta_module.RealizedGainLoss = FakeRealizedGainLoss
+    yuanta_module.enumMarketType = FakeEnumMarketType
+    monkeypatch.setitem(sys.modules, "YuantaOneAPI", yuanta_module)
+
+    result = YuantaAdapter._convert_query_object_params(
+        "GetStkHistoryReportReversal",
+        {
+            "Account": "S98875005091",
+            "ReGainLoss": {
+                "account": "S98875005091",
+                "market_no": "TWSE",
+                "stk_code": "2330",
+                "trade_date": "2026/08/01",
+                "total_amt": 105000,
+            },
+        },
+    )
+
+    typed = result["ReGainLoss"]
+    assert isinstance(typed, FakeRealizedGainLoss)
+    assert typed.Account == "S98875005091"
+    assert typed.MarketNo == "enum-twse"
+    assert typed.StkCode == "2330"
+    assert typed.TradeDate == "2026/08/01"
+    assert typed.TotalAMT == 105000

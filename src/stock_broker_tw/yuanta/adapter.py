@@ -7,6 +7,7 @@ should use this class instead of touching pythonnet directly.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Any, Self
@@ -14,6 +15,8 @@ from typing import Any, Self
 from stock_broker_tw.yuanta import loader
 from stock_broker_tw.yuanta.events import EventQueue, YuantaEvent
 from stock_broker_tw.yuanta.serializer import login_result_to_dict, to_dict
+
+logger = logging.getLogger(__name__)
 
 
 class YuantaAdapterError(RuntimeError):
@@ -241,6 +244,7 @@ class YuantaAdapter:
             try:
                 data = to_dict(obj_value)
             except Exception:
+                logger.exception("failed to serialize %s response", str_index)
                 data = None
             if data is not None:
                 response_id = self._extract_response_request_id(data)
@@ -552,6 +556,30 @@ class YuantaAdapter:
                 class_name, value, attr_map
             )
 
+        re_gain_loss = result.get("ReGainLoss")
+        if isinstance(re_gain_loss, dict):
+            result["ReGainLoss"] = YuantaAdapter._build_typed_object(
+                "RealizedGainLoss",
+                re_gain_loss,
+                {
+                    "account": "Account",
+                    "market_no": "MarketNo",
+                    "stk_code": "StkCode",
+                    "trade_date": "TradeDate",
+                    "trade_kind": "TradeKind",
+                    "price": "Price",
+                    "qty": "Qty",
+                    "profit_loss": "ProfitLoss",
+                    "order_no": "OrderNo",
+                    "term_split": "TermSplit",
+                    "term_ext": "TermExt",
+                    "charge": "Charge",
+                    "cost": "Cost",
+                    "tax": "Tax",
+                    "total_amt": "TotalAMT",
+                },
+            )
+
         # Convert common string/int parameters to the .NET enum types expected
         # by the Yuanta API methods.
         try:
@@ -574,6 +602,32 @@ class YuantaAdapter:
             # If the assembly is not loaded (e.g. unit tests), leave values as-is.
             pass
         return result
+
+    @staticmethod
+    def _build_typed_object(
+        class_name: str,
+        item: dict[str, Any],
+        attr_map: dict[str, str],
+    ) -> Any:
+        """Build one .NET object from a JSON-friendly mapping when possible."""
+        try:
+            from YuantaOneAPI import enumMarketType
+
+            module = __import__("YuantaOneAPI", fromlist=[class_name])
+            cls = getattr(module, class_name)
+            result = cls()
+            for key, value in item.items():
+                attr = attr_map.get(str(key), str(key))
+                if not hasattr(result, attr):
+                    continue
+                if attr == "MarketNo" and isinstance(value, str):
+                    value = getattr(enumMarketType, value, value)
+                setattr(result, attr, value)
+            return result
+        except Exception:
+            # Test fakes and callers without the optional SDK still receive the
+            # original mapping instead of failing during parameter normalization.
+            return item
 
     @staticmethod
     def _build_typed_object_list(

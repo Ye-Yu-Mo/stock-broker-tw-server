@@ -424,7 +424,7 @@ def stk_store_to_dict(obj: Any) -> dict[str, Any]:
     return {
         "account": _get_attr(obj, "Account"),
         "trade_kind": _get_attr(obj, "TradeKind"),
-        "market_no": to_dict(_get_attr(obj, "MarketNo")),
+        "market_no": _json_scalar(_get_attr(obj, "MarketNo")),
         "market_name": _get_attr(obj, "MarketName"),
         "stk_code": _get_attr(obj, "StkCode"),
         "stk_name": _get_attr(obj, "StkName"),
@@ -460,7 +460,7 @@ def ov_stk_store_to_dict(obj: Any) -> dict[str, Any]:
     return {
         "account": _get_attr(obj, "Account"),
         "currency_type": _get_attr(obj, "CurrencyType"),
-        "market_no": to_dict(_get_attr(obj, "MarketNo")),
+        "market_no": _json_scalar(_get_attr(obj, "MarketNo")),
         "market_name": _get_attr(obj, "MarketName"),
         "stk_code": _get_attr(obj, "StkCode"),
         "stk_name": _get_attr(obj, "StkName"),
@@ -522,7 +522,7 @@ def unrealized_gain_loss_detail_to_dict(obj: Any) -> dict[str, Any]:
     return {
         "account": _get_attr(obj, "Account"),
         "trade_kind": _get_attr(obj, "TradeKind"),
-        "market_no": to_dict(_get_attr(obj, "MarketNo")),
+        "market_no": _json_scalar(_get_attr(obj, "MarketNo")),
         "stk_code": _get_attr(obj, "StkCode"),
         "stock_qty": _get_attr(obj, "StockQty"),
         "price": _get_attr(obj, "Price"),
@@ -543,7 +543,7 @@ def realized_gain_loss_to_dict(obj: Any) -> dict[str, Any]:
     """Serialize a ``RealizedGainLoss`` object."""
     return {
         "account": _get_attr(obj, "Account"),
-        "market_no": to_dict(_get_attr(obj, "MarketNo")),
+        "market_no": _json_scalar(_get_attr(obj, "MarketNo")),
         "stk_code": _get_attr(obj, "StkCode"),
         "trade_date": _get_attr(obj, "TradeDate"),
         "trade_kind": _get_attr(obj, "TradeKind"),
@@ -587,7 +587,7 @@ def real_report_to_dict(obj: Any) -> dict[str, Any]:
         "account": _get_attr(obj, "Account"),
         "rpt_type": _get_attr(obj, "RptType"),
         "order_no": _get_attr(obj, "OrderNo"),
-        "market_no": to_dict(_get_attr(obj, "MarketNo")),
+        "market_no": _json_scalar(_get_attr(obj, "MarketNo")),
         "company_no": _get_attr(obj, "CompanyNo"),
         "stk_c_name": _get_attr(obj, "StkCName"),
         "order_date": to_dict(_get_attr(obj, "OrderDate")),
@@ -627,7 +627,7 @@ def real_report_merge_to_dict(obj: Any) -> dict[str, Any]:
         "account": _get_attr(obj, "Account"),
         "rpt_type": _get_attr(obj, "RptType"),
         "order_no": _get_attr(obj, "OrderNo"),
-        "market_no": to_dict(_get_attr(obj, "MarketNo")),
+        "market_no": _json_scalar(_get_attr(obj, "MarketNo")),
         "company_no": _get_attr(obj, "CompanyNo"),
         "order_date": to_dict(_get_attr(obj, "OrderDate")),
         "order_time": to_dict(_get_attr(obj, "OrderTime")),
@@ -691,7 +691,7 @@ def stk_order_to_dict(obj: Any) -> dict[str, Any]:
     return {
         "account": _get_attr(obj, "Account"),
         "trade_date": to_dict(_get_attr(obj, "TradeDate")),
-        "market_no": to_dict(_get_attr(obj, "MarketNo")),
+        "market_no": _json_scalar(_get_attr(obj, "MarketNo")),
         "market_name": _get_attr(obj, "MarketName"),
         "company_no": _get_attr(obj, "CompanyNo"),
         "stk_name": _get_attr(obj, "StkName"),
@@ -735,7 +735,7 @@ def stk_trade_to_dict(obj: Any) -> dict[str, Any]:
     """Serialize a ``StkTrade`` (domestic stock trade) object."""
     return {
         "account": _get_attr(obj, "Account"),
-        "market_no": to_dict(_get_attr(obj, "MarketNo")),
+        "market_no": _json_scalar(_get_attr(obj, "MarketNo")),
         "market_name": _get_attr(obj, "MarketName"),
         "company_no": _get_attr(obj, "CompanyNo"),
         "stk_name": _get_attr(obj, "StkName"),

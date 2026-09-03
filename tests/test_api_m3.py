@@ -110,7 +110,7 @@ def test_pnl_and_report_endpoints(tmp_path: Path) -> None:
         paths = [
             "/api/v1/pnl/unrealized",
             "/api/v1/pnl/realized?start_date=2026/01/01&end_date=2026/01/31",
-            "/api/v1/pnl/reversal",
+            "/api/v1/pnl/reversal?re_gain_loss=%7B%7D",
             "/api/v1/reports/real",
             "/api/v1/reports/real-merge",
             "/api/v1/reports/order-trade",
@@ -118,6 +118,22 @@ def test_pnl_and_report_endpoints(tmp_path: Path) -> None:
         for path in paths:
             res = client.get(path, headers=auth())
             assert res.status_code == 200, f"{path}: {res.text}"
+
+
+def test_reversal_requires_json_object(tmp_path: Path) -> None:
+    client, _ = make_client(tmp_path)
+    with client:
+        missing = client.get("/api/v1/pnl/reversal", headers=auth())
+        assert missing.status_code == 400
+        assert missing.json()["detail"]["code"] == "REGAINLOSS_REQUIRED"
+
+        for value in ("null", "[]", "1"):
+            res = client.get(
+                f"/api/v1/pnl/reversal?re_gain_loss={value}",
+                headers=auth(),
+            )
+            assert res.status_code == 400
+            assert res.json()["detail"]["code"] == "INVALID_REQUEST"
 
 
 def test_invalid_date_returns_400(tmp_path: Path) -> None:

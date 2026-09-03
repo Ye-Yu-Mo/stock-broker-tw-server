@@ -307,19 +307,34 @@ async def pnl_reversal(
     account: str | None = None,
 ) -> dict[str, Any]:
     service = get_query_service(request)
-    payload: dict[str, Any] | None = None
-    if re_gain_loss:
-        try:
-            payload = json.loads(re_gain_loss)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "code": "INVALID_REQUEST",
-                    "message": "re_gain_loss must be a JSON object",
-                    "detail": {"value": re_gain_loss},
-                },
-            ) from exc
+    if not re_gain_loss:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "REGAINLOSS_REQUIRED",
+                "message": "re_gain_loss is required",
+            },
+        )
+    try:
+        payload = json.loads(re_gain_loss)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "re_gain_loss must be a JSON object",
+                "detail": {"value": re_gain_loss},
+            },
+        ) from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_REQUEST",
+                "message": "re_gain_loss must be a JSON object",
+                "detail": {"value": payload},
+            },
+        )
     try:
         return ok(
             await service.reversal_pnl(
