@@ -113,3 +113,34 @@ def test_async_event_consumer_dispatches_until_stop() -> None:
         assert [e.str_index for e in received] == ["one", "two"]
 
     asyncio.run(scenario())
+
+
+def test_async_owner_does_not_leave_sync_backlog() -> None:
+    async def scenario() -> None:
+        eq = EventQueue()
+        eq.put(make_event("before-owner"))
+        received: list[YuantaEvent] = []
+        consumer = eq.consume(received.append)
+        await consumer.start()
+        for name in ("one", "two"):
+            eq.put(make_event(name))
+        await asyncio.sleep(0.02)
+        await consumer.stop()
+
+        assert [event.str_index for event in received] == ["before-owner", "one", "two"]
+        assert eq.qsize() == 0
+
+    asyncio.run(scenario())
+
+
+def test_async_owner_stop_does_not_poison_sync_queue() -> None:
+    async def scenario() -> None:
+        eq = EventQueue()
+        consumer = eq.consume(lambda event: None)
+        await consumer.start()
+        await consumer.stop()
+        assert eq.qsize() == 0
+        with pytest.raises(queue.Empty):
+            eq.get_nowait()
+
+    asyncio.run(scenario())

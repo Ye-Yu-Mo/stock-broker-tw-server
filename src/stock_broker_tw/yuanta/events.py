@@ -70,15 +70,19 @@ class EventQueue:
         self._queue: queue.Queue[YuantaEvent | object] = queue.Queue()
         self._async_queue: asyncio.Queue[YuantaEvent | object] | None = None
         self._async_loop: asyncio.AbstractEventLoop | None = None
+        self._async_only = False
         self._async_queue_lock = threading.Lock()
 
     def put(self, event: YuantaEvent) -> None:
         """Put an event into the queue. Safe to call from any thread."""
-        self._queue.put(event)
+        with self._async_queue_lock:
+            async_queue = self._async_queue
+            async_loop = self._async_loop
+            if not self._async_only:
+                self._queue.put(event)
         metrics.event_queue_size.set(self.qsize())
-        async_queue = self._async_queue
-        if async_queue is not None and self._async_loop is not None:
-            self._async_loop.call_soon_threadsafe(async_queue.put_nowait, event)
+        if async_queue is not None and async_loop is not None:
+            async_loop.call_soon_threadsafe(async_queue.put_nowait, event)
 
     def put_nowait(self, event: YuantaEvent) -> None:
         """Compatibility alias matching :class:`queue.Queue`."""
@@ -87,6 +91,15 @@ class EventQueue:
     def put_event(self, event: YuantaEvent) -> None:
         """Alias for :meth:`put`."""
         self.put(event)
+
+    def _put_async(self, item: YuantaEvent | object) -> None:
+        """Put an internal item on the async owner queue only."""
+        with self._async_queue_lock:
+            async_queue = self._async_queue
+            async_loop = self._async_loop
+        if async_queue is None or async_loop is None:
+            raise RuntimeError("async queue has not been initialized")
+        async_loop.call_soon_threadsafe(async_queue.put_nowait, item)
 
     def get(self, timeout: float | None = None) -> YuantaEvent:
         """Remove and return the next event.
@@ -112,42 +125,61 @@ class EventQueue:
         return self.get(timeout)
 
     def qsize(self) -> int:
-        return self._queue.qsize()
+        with self._async_queue_lock:
+            if self._async_only and self._async_queue is not None:
+                return self._async_queue.qsize()
+            return self._queue.qsize()
 
     def empty(self) -> bool:
-        return self._queue.empty()
+        return self.qsize() == 0
 
     def _ensure_async_queue(self) -> asyncio.Queue[YuantaEvent | object]:
-        if self._async_queue is None:
-            # asyncio.Queue must be created from a running event loop.
-            loop = asyncio.get_running_loop()
-            with self._async_queue_lock:
-                if self._async_queue is None:
-                    self._async_queue = asyncio.Queue()
-                    self._async_loop = loop
-                    # If events were put before the first async consumer was
-                    # created, move them to the async side so they are not lost.
-                    while True:
-                        try:
-                            item = self._queue.get_nowait()
-                        except queue.Empty:
-                            break
-                        self._async_queue.put_nowait(item)
-        return self._async_queue
+        # asyncio.Queue must be created from a running event loop.
+        loop = asyncio.get_running_loop()
+        with self._async_queue_lock:
+            if self._async_queue is None:
+                self._async_queue = asyncio.Queue()
+                self._async_loop = loop
+                # If events were put before the first async consumer was
+                # created, move them to the async side so they are not lost.
+                while True:
+                    try:
+                        item = self._queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    self._async_queue.put_nowait(item)
+            return self._async_queue
+
+    def claim_async_owner(self) -> None:
+        """Make the current event loop the sole owner of future events."""
+        loop = asyncio.get_running_loop()
+        with self._async_queue_lock:
+            if self._async_loop is not None and self._async_loop is not loop:
+                raise RuntimeError("event queue is owned by another event loop")
+            if self._async_queue is None:
+                self._async_queue = asyncio.Queue()
+                self._async_loop = loop
+            while True:
+                try:
+                    item = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                self._async_queue.put_nowait(item)
+            self._async_only = True
+        metrics.event_queue_size.set(self.qsize())
 
     async def async_get(self, timeout: float | None = None) -> YuantaEvent:
-        """Asynchronously wait for the next event without blocking the loop.
-
-        Internal sentinels are returned to async consumers so they can stop
-        cleanly; synchronous :meth:`get` still raises ``queue.Empty`` for them.
-        """
+        """Asynchronously wait for the next event without blocking the loop."""
         async_queue = self._ensure_async_queue()
         try:
             if timeout is None:
-                return await async_queue.get()  # type: ignore[return-value]
-            return await asyncio.wait_for(async_queue.get(), timeout)  # type: ignore[return-value]
+                item = await async_queue.get()
+            else:
+                item = await asyncio.wait_for(async_queue.get(), timeout)
         except TimeoutError:
             raise queue.Empty from None
+        metrics.event_queue_size.set(self.qsize())
+        return item  # type: ignore[return-value]
 
     def consume(
         self, handler: Callable[[YuantaEvent], Any]
@@ -172,17 +204,16 @@ class AsyncEventConsumer:
         """Start consuming events in the background."""
         if self._task is not None and not self._task.done():
             return
-        # Make sure the async queue exists before the producer starts putting
-        # events; otherwise events enqueued immediately after start() could be
-        # missed by the asyncio side.
-        self._event_queue._ensure_async_queue()
+        # Claim ownership before the producer can enqueue new events so the
+        # synchronous compatibility queue cannot retain an unbounded copy.
+        self._event_queue.claim_async_owner()
         self._task = asyncio.create_task(self._run())
 
     async def stop(self, timeout: float = 5.0) -> None:
         """Stop the consumer after all already-queued events are processed."""
         if self._task is None or self._task.done():
             return
-        self._event_queue.put(_SENTINEL)  # type: ignore[arg-type]
+        self._event_queue._put_async(_SENTINEL)
         await asyncio.wait_for(asyncio.shield(self._task), timeout=timeout)
 
     async def _run(self) -> None:

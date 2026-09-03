@@ -151,3 +151,39 @@ def test_status_reflects_lifecycle() -> None:
     assert status["opened"] is True
     assert status["logged_in"] is True
     assert "event_queue_size" in status
+
+
+def test_wait_for_login_result_does_not_consume_other_events() -> None:
+    async def scenario() -> None:
+        service, adapter = make_service()
+        adapter.event_queue.put(YuantaEvent(2, 0, "SubscribeStockTick", None, {}))
+
+        async def publish_login() -> None:
+            await asyncio.sleep(0.02)
+            adapter.last_login_result = {"login_list": [{"account": "S"}]}
+
+        publisher = asyncio.create_task(publish_login())
+        result = await service._wait_for_login_result(adapter, timeout=0.5)
+        await publisher
+
+        assert result["login_list"][0]["account"] == "S"
+        assert adapter.event_queue.get_nowait().str_index == "SubscribeStockTick"
+
+    run(scenario())
+
+
+def test_login_runs_success_callback() -> None:
+    async def scenario() -> None:
+        calls: list[str] = []
+
+        async def on_login_success() -> None:
+            calls.append("recovery")
+
+        service, _ = make_service()
+        service.on_login_success = on_login_success
+        result = await service.login(LoginCredentials())
+
+        assert result["login_list"]
+        assert calls == ["recovery"]
+
+    run(scenario())

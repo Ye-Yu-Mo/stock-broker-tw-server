@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import queue
+import inspect
 import uuid
 from typing import Any
 
@@ -13,7 +13,6 @@ from stock_broker_tw.audit import AuditLogger
 from stock_broker_tw.config import Settings
 from stock_broker_tw.metrics import metrics
 from stock_broker_tw.yuanta.adapter import YuantaAdapter, YuantaAdapterError
-from stock_broker_tw.yuanta.serializer import login_result_to_dict
 
 
 class SessionError(Exception):
@@ -43,10 +42,12 @@ class SessionService:
         adapter: YuantaAdapter,
         settings: Settings,
         audit: AuditLogger | None = None,
+        on_login_success: Any = None,
     ) -> None:
         self.adapter = adapter
         self.settings = settings
         self.audit = audit or AuditLogger(enabled=settings.audit.enabled, file_path=settings.audit.file)
+        self.on_login_success = on_login_success
 
     async def login(
         self,
@@ -149,6 +150,19 @@ class SessionService:
             account=account,
             login_list=login_list,
         )
+        if self.on_login_success is not None:
+            try:
+                recovery = self.on_login_success()
+                if inspect.isawaitable(recovery):
+                    await recovery
+            except Exception as exc:  # noqa: BLE001 - recovery must not block login
+                self.audit.record(
+                    "recovery.after_login",
+                    result="error",
+                    request_id=request_id,
+                    account=account,
+                    error=str(exc),
+                )
         return result
 
     async def logout(self, request_id: str | None = None) -> dict[str, Any]:
@@ -203,6 +217,7 @@ class SessionService:
 
     @staticmethod
     async def _wait_for_login_result(adapter: YuantaAdapter, timeout: float) -> dict[str, Any]:
+        """Wait for the adapter cache without consuming shared raw events."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while True:
@@ -213,23 +228,7 @@ class SessionService:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise TimeoutError(f"timed out after {timeout:.1f}s waiting for Login response")
-            try:
-                event = await asyncio.wait_for(
-                    adapter.event_queue.async_get(),
-                    timeout=min(0.1, remaining),
-                )
-            except (TimeoutError, queue.Empty):
-                continue
-
-            if event.str_index == "Login":
-                result = login_result_to_dict(event.obj_value)
-                # If the fake/test adapter does not populate last_login_result,
-                # consume the event directly and remember the result.
-                try:
-                    adapter.last_login_result = result  # type: ignore[attr-defined]
-                except Exception:
-                    pass
-                return result
+            await asyncio.sleep(min(0.1, remaining))
 
 
 __all__ = ["LoginCredentials", "SessionError", "SessionService"]

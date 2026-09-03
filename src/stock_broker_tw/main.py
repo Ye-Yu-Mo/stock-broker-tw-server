@@ -123,6 +123,17 @@ def create_app(
     )
     report_handler = ReportHandler(state_store, broadcaster=ws_manager, notifier=notifier)
 
+    async def recover_after_login() -> dict[str, Any]:
+        summary = await run_startup_recovery(
+            state_store,
+            query_service,
+            adapter,
+            audit=audit,
+            notifier=notifier,
+        )
+        app.state.last_recovery = summary
+        return summary
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await ws_manager.start(adapter.event_queue, report_handler=report_handler)
@@ -142,6 +153,7 @@ def create_app(
         version="0.1.0",
         lifespan=lifespan,
     )
+    session_service.on_login_success = recover_after_login
     app.state.settings = settings
     app.state.adapter = adapter
     app.state.audit = audit

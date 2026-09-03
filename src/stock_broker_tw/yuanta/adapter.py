@@ -249,16 +249,6 @@ class YuantaAdapter:
             if data is not None:
                 response_id = self._extract_response_request_id(data)
 
-        event = YuantaEvent(
-            int_mark=int_mark,
-            dw_index=dw_index,
-            str_index=str_index,
-            obj_handle=obj_handle,
-            obj_value=obj_value,
-            request_id=response_id,
-        )
-        self._event_queue.put(event)
-
         if str_index == "Login":
             try:
                 login_data = login_result_to_dict(obj_value)
@@ -269,6 +259,16 @@ class YuantaAdapter:
                     self._logged_in = False
             except Exception:
                 pass
+
+        event = YuantaEvent(
+            int_mark=int_mark,
+            dw_index=dw_index,
+            str_index=str_index,
+            obj_handle=obj_handle,
+            obj_value=obj_value,
+            request_id=response_id,
+        )
+        self._event_queue.put(event)
 
         # Query/trade responses are stored separately so ``query()`` and
         # ``send_stock_order()`` do not steal unrelated events from the shared
