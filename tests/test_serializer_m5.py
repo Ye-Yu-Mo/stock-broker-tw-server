@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import ClassVar
 
 from stock_broker_tw.yuanta.serializer import (
@@ -184,6 +185,31 @@ class FakeKLineResult:
     KLineList: ClassVar[list[FakeKLine]] = [FakeKLine()]
 
 
+class FakeMarketType:
+    def __str__(self) -> str:
+        return "TWSE"
+
+
+class FakeStkInformationWithEnum(FakeStkInformation):
+    MarketNo = FakeMarketType()
+
+
+class FakeStkInformationResultWithEnum:
+    StockInformationList: ClassVar[list[FakeStkInformation]] = [FakeStkInformationWithEnum()]
+
+
+class FakeStickDetailResultWithEnum(FakeStickDetailResult):
+    MarketNo = FakeMarketType()
+
+
+class FakeStkClassifyPriceResultWithEnum(FakeStkClassifyPriceResult):
+    MarketNo = FakeMarketType()
+
+
+class FakeKLineResultWithEnum(FakeKLineResult):
+    MarketNo = FakeMarketType()
+
+
 def test_watch_list_result_to_dict() -> None:
     data = watch_list_result_to_dict(FakeWatchListResult())
     assert data["stk_code"] == "2330"
@@ -247,3 +273,28 @@ def test_to_dict_dispatches_m5_types() -> None:
     assert to_dict(FakeWatchListResult()) == watch_list_result_to_dict(FakeWatchListResult())
     assert to_dict(FakeStockTickResult()) == stock_tick_result_to_dict(FakeStockTickResult())
     assert to_dict(FakeKLineResult()) == k_line_result_to_dict(FakeKLineResult())
+
+
+def test_m5_market_no_enum_values_are_json_safe() -> None:
+    cases = [
+        (
+            stk_information_result_to_dict(FakeStkInformationResultWithEnum()),
+            lambda data: data["stock_information_list"][0]["market_no"],
+        ),
+        (
+            stick_detail_result_to_dict(FakeStickDetailResultWithEnum()),
+            lambda data: data["market_no"],
+        ),
+        (
+            stk_classify_price_result_to_dict(FakeStkClassifyPriceResultWithEnum()),
+            lambda data: data["market_no"],
+        ),
+        (
+            k_line_result_to_dict(FakeKLineResultWithEnum()),
+            lambda data: data["market_no"],
+        ),
+    ]
+
+    for data, get_market_no in cases:
+        assert get_market_no(data) == "TWSE"
+        json.dumps(data)

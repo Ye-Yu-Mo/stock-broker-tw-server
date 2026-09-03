@@ -404,6 +404,13 @@ object_to_dict = to_dict
 # ---------------------------------------------------------------------------
 
 
+def _json_scalar(value: Any) -> Any:
+    """Keep JSON primitives and stringify SDK scalar values such as enums."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
 def _get_attr(obj: Any, name: str, default: Any = None) -> Any:
     """Get an attribute while allowing pythonnet to raise on missing props."""
     try:
@@ -935,7 +942,7 @@ def stock_other_info_result_to_dict(obj: Any) -> dict[str, Any]:
 def stk_information_to_dict(obj: Any) -> dict[str, Any]:
     """Serialize a ``StkInformation`` stock info row."""
     return {
-        "market_no": _get_attr(obj, "MarketNo"),
+        "market_no": _json_scalar(_get_attr(obj, "MarketNo")),
         "stock_code": _get_attr(obj, "StockCode"),
         "dayoffmark": _get_attr(obj, "Dayoffmark"),
         "creditpercent": _get_attr(obj, "Creditpercent"),
@@ -971,7 +978,7 @@ def stick_detail_to_dict(obj: Any) -> dict[str, Any]:
 def stick_detail_result_to_dict(obj: Any) -> dict[str, Any]:
     """Serialize a ``StickDetailResult`` query result."""
     return {
-        "market_no": _get_attr(obj, "MarketNo"),
+        "market_no": _json_scalar(_get_attr(obj, "MarketNo")),
         "stock_code": _get_attr(obj, "StockCode"),
         "stick_detail_list": to_list(_get_attr(obj, "StickDetailList")),
     }
@@ -991,7 +998,7 @@ def stk_classify_price_result_to_dict(obj: Any) -> dict[str, Any]:
     """Serialize a ``StkClassifyPriceResult`` query result."""
     return {
         "date": _get_attr(obj, "Date"),
-        "market_no": _get_attr(obj, "MarketNo"),
+        "market_no": _json_scalar(_get_attr(obj, "MarketNo")),
         "stock_code": _get_attr(obj, "StockCode"),
         "classify_price_list": to_list(_get_attr(obj, "ClassifyPriceList")),
     }
@@ -1012,7 +1019,7 @@ def k_line_to_dict(obj: Any) -> dict[str, Any]:
 def k_line_result_to_dict(obj: Any) -> dict[str, Any]:
     """Serialize a ``KLineResult`` query result."""
     return {
-        "market_no": _get_attr(obj, "MarketNo"),
+        "market_no": _json_scalar(_get_attr(obj, "MarketNo")),
         "stock_code": _get_attr(obj, "StockCode"),
         "k_line_list": to_list(_get_attr(obj, "KLineList")),
     }
