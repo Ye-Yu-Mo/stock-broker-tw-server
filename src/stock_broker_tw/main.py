@@ -150,7 +150,7 @@ def create_app(
 
     app = FastAPI(
         title="stock-broker-tw-server",
-        version="0.1.0",
+        version="0.1.1",
         lifespan=lifespan,
     )
     session_service.on_login_success = recover_after_login

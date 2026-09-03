@@ -16,6 +16,23 @@
 
 ---
 
+## [0.1.1] - 2026-09-03
+
+### Fixed
+
+- 修复 M3/M5 元大 `enumMarketType` 响应无法被 JSON 序列化的问题，持仓、分时、分价量、K 线和个股资讯接口可正常返回。
+- 修复 `GetStkHistoryReportReversal` 的 `RealizedGainLoss` 参数转换，并对缺少或错误格式的 `re_gain_loss` 返回明确的 400 错误。
+- 修复 WebSocket async consumer 下 EventQueue 同步副本持续累积的问题，保留 CLI 同步队列兼容性。
+- 修复登录等待与 WebSocket 事件竞争，避免登录流程吞掉其他原始事件。
+- 登录成功后触发未完成订单恢复，并更新健康检查中的 recovery 状态。
+
+### Verification
+
+- 只读 HTTP 接口已通过真实服务验证。
+- 自动化测试：221 passed；Ruff 检查通过。
+- 新单、撤单、改价、改量尚未在真实账户上验证。
+- 本版本不包含 `TODO-M1.md` 的 mock 撮合开发。
+
 ## [0.1.0] - 2026-08-28
 
 ### Added
