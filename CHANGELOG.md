@@ -16,6 +16,43 @@
 
 ---
 
+## [0.1.2] - 2026-09-04
+
+### Added
+
+- 新增请求级 `mock` 下单标记与独立 Mock 账户初始化/查询接口。
+- 新增按实时盘口对手价撮合：买单使用 ask1，卖单使用 bid1，并维护 Mock 账户现金与持仓。
+- 新增风控拒绝飞书告警、重复告警去重和通知发送指标。
+
+### Changed
+
+- 增强 Yuanta 登录 DEBUG 诊断，区分 Open、Login 同步返回和 Login 异步回报阶段。
+- Mock 订单继续使用订单状态机、SQLite 持久化和 WebSocket `order.updated` 推送。
+- 修复飞书交互卡片正文重复展示问题。
+
+### Verification
+
+- 自动化测试：238 passed；Ruff 检查通过。
+- PROD/UAT 真实账户登录仍需元大账户、证书绑定和 Spark API 权限验证。
+- 本版本不包含真实账户买卖、撤单或改单验收证据。
+
+## [0.1.1] - 2026-09-03
+
+### Fixed
+
+- 修复 M3/M5 元大 `enumMarketType` 响应无法被 JSON 序列化的问题，持仓、分时、分价量、K 线和个股资讯接口可正常返回。
+- 修复 `GetStkHistoryReportReversal` 的 `RealizedGainLoss` 参数转换，并对缺少或错误格式的 `re_gain_loss` 返回明确的 400 错误。
+- 修复 WebSocket async consumer 下 EventQueue 同步副本持续累积的问题，保留 CLI 同步队列兼容性。
+- 修复登录等待与 WebSocket 事件竞争，避免登录流程吞掉其他原始事件。
+- 登录成功后触发未完成订单恢复，并更新健康检查中的 recovery 状态。
+
+### Verification
+
+- 只读 HTTP 接口已通过真实服务验证。
+- 自动化测试：221 passed；Ruff 检查通过。
+- 新单、撤单、改价、改量尚未在真实账户上验证。
+- 本版本不包含 `TODO-M1.md` 的 mock 撮合开发。
+
 ## [0.1.0] - 2026-08-28
 
 ### Added

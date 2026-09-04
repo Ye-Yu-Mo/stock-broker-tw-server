@@ -7,6 +7,7 @@ from unittest import mock
 
 import pytest
 
+from stock_broker_tw.metrics import metrics
 from stock_broker_tw.notify import Notifier, format_message
 
 
@@ -108,6 +109,8 @@ def test_notifier_uses_lark_alert_card_when_installed() -> None:
     assert card.kwargs["service"] == "stock-broker-tw-server"
     assert card.kwargs["node"] == "local"
     assert card.data["title"] == "订单状态变化"
+    assert card.data["summary"] == "order.status · C001"
+    assert card.data["details"] is None
     data = json.loads(card.to_json())
     assert data["msg_type"] == "interactive"
 
@@ -118,7 +121,15 @@ def test_notifier_unreachable_webhook_does_not_raise() -> None:
         assert notifier.send("order.updated", "title", {}) is False
 
 
-def test_notifier_event_disabled_returns_false() -> None:
+def test_notifier_unreachable_webhook_is_counted() -> None:
+    notifier = Notifier(enabled=True, webhook_url="http://example.test/hook", timeout=0.01)
+    before = metrics.notifications_failed_total.labels(event="risk.rejected")._value.get()
+    with mock.patch("urllib.request.urlopen", side_effect=RuntimeError("network down")):
+        assert notifier.send("risk.rejected", "风控拒绝", {"reason": "BLACKLISTED"}) is False
+    after = metrics.notifications_failed_total.labels(event="risk.rejected")._value.get()
+    assert after == before + 1
+
+
     class EventCfg:
         enabled = False
         title = "忽略"

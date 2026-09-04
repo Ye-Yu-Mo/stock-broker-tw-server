@@ -12,6 +12,16 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+
+class MockAccountError(Exception):
+    """Raised when a simulated account cannot complete an operation."""
+
+    def __init__(self, message: str, code: str = "MOCK_ACCOUNT_ERROR") -> None:
+        super().__init__(message)
+        self.message = message
+        self.code = code
+
+
 _FINAL_ORDER_STATUSES = {"10", "20", "24", "25", "30"}
 
 
@@ -160,6 +170,14 @@ class StateStore:
                     UNIQUE(account, quote_type, symbol, market_type, index_flag)
                 );
 
+                CREATE TABLE IF NOT EXISTS mock_accounts (
+                    account TEXT PRIMARY KEY,
+                    cash REAL NOT NULL,
+                    positions TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_orders_order_no ON orders(order_no);
                 CREATE INDEX IF NOT EXISTS idx_stock_orders_order_no ON stock_orders(order_no);
                 CREATE INDEX IF NOT EXISTS idx_stock_orders_status ON stock_orders(status);
@@ -252,7 +270,185 @@ class StateStore:
             conn.execute("ALTER TABLE quote_subscriptions_migrated RENAME TO quote_subscriptions")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_quote_subscriptions_account ON quote_subscriptions(account)")
 
-    # -- snapshots ---------------------------------------------------------
+    # -- mock accounts ------------------------------------------------------
+
+    @staticmethod
+    def _normalize_mock_positions(positions: Any) -> dict[str, dict[str, Any]]:
+        if positions is None:
+            return {}
+        if isinstance(positions, dict):
+            entries = []
+            for stk_code, value in positions.items():
+                if isinstance(value, dict):
+                    entries.append({"stk_code": stk_code, **value})
+                else:
+                    entries.append({"stk_code": stk_code, "quantity": value})
+        elif isinstance(positions, list):
+            entries = positions
+        else:
+            raise MockAccountError("positions must be a list or mapping", "INVALID_MOCK_POSITIONS")
+
+        normalized: dict[str, dict[str, Any]] = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise MockAccountError("each position must be an object", "INVALID_MOCK_POSITION")
+            stk_code = str(entry.get("stk_code") or entry.get("symbol") or "").strip()
+            if not stk_code:
+                raise MockAccountError("position stk_code is required", "INVALID_MOCK_POSITION")
+            try:
+                quantity = int(entry.get("quantity", entry.get("qty", 0)) or 0)
+            except (TypeError, ValueError) as exc:
+                raise MockAccountError(
+                    f"invalid position quantity for {stk_code}", "INVALID_MOCK_POSITION"
+                ) from exc
+            if quantity < 0:
+                raise MockAccountError(
+                    f"position quantity must be non-negative for {stk_code}",
+                    "INVALID_MOCK_POSITION",
+                )
+            avg_price = entry.get("avg_price")
+            if avg_price is not None:
+                try:
+                    avg_price = float(avg_price)
+                except (TypeError, ValueError) as exc:
+                    raise MockAccountError(
+                        f"invalid average price for {stk_code}", "INVALID_MOCK_POSITION"
+                    ) from exc
+            normalized[stk_code] = {"quantity": quantity, "avg_price": avg_price}
+        return normalized
+
+    @staticmethod
+    def _mock_account_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "account": row["account"],
+            "cash": float(row["cash"]),
+            "positions": _json_loads(row["positions"]) or {},
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def init_mock_account(
+        self,
+        account: str,
+        cash: float,
+        positions: Any = None,
+    ) -> dict[str, Any]:
+        account = str(account or "").strip()
+        if not account:
+            raise MockAccountError("mock account is required", "INVALID_MOCK_ACCOUNT")
+        try:
+            cash = float(cash)
+        except (TypeError, ValueError) as exc:
+            raise MockAccountError("cash must be numeric", "INVALID_MOCK_ACCOUNT") from exc
+        if cash < 0:
+            raise MockAccountError("cash must be non-negative", "INVALID_MOCK_ACCOUNT")
+        normalized = self._normalize_mock_positions(positions)
+        now = _now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO mock_accounts (account, cash, positions, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(account) DO UPDATE SET
+                    cash = excluded.cash,
+                    positions = excluded.positions,
+                    updated_at = excluded.updated_at
+                """,
+                (account, cash, _json_dumps(normalized), now, now),
+            )
+        return self.get_mock_account(account) or {}
+
+    def get_mock_account(self, account: str) -> dict[str, Any] | None:
+        row = self._fetchone(
+            "SELECT * FROM mock_accounts WHERE account = ?",
+            (str(account),),
+        )
+        return self._mock_account_row_to_dict(row) if row is not None else None
+
+    def apply_mock_fill(
+        self,
+        account: str,
+        side: str,
+        stk_code: str,
+        quantity: int,
+        price: float,
+    ) -> dict[str, Any]:
+        try:
+            quantity = int(quantity)
+            price = float(price)
+        except (TypeError, ValueError) as exc:
+            raise MockAccountError("invalid mock fill", "INVALID_MOCK_FILL") from exc
+        if quantity <= 0 or price <= 0:
+            raise MockAccountError("quantity and price must be positive", "INVALID_MOCK_FILL")
+
+        side = str(side).upper()
+        if side not in {"B", "S"}:
+            raise MockAccountError("side must be B or S", "INVALID_MOCK_FILL")
+        account = str(account)
+        stk_code = str(stk_code).strip()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM mock_accounts WHERE account = ?",
+                (account,),
+            ).fetchone()
+            if row is None:
+                raise MockAccountError(
+                    f"mock account not found: {account}", "MOCK_ACCOUNT_NOT_FOUND"
+                )
+
+            cash = float(row["cash"])
+            positions = self._normalize_mock_positions(_json_loads(row["positions"]))
+            position = positions.get(stk_code, {"quantity": 0, "avg_price": None})
+            current_quantity = int(position.get("quantity", 0) or 0)
+            notional = price * quantity
+            if side == "B":
+                if cash < notional:
+                    raise MockAccountError(
+                        "mock account has insufficient cash", "INSUFFICIENT_CASH"
+                    )
+                new_quantity = current_quantity + quantity
+                old_avg = position.get("avg_price")
+                if old_avg is None:
+                    avg_price = price
+                else:
+                    avg_price = (
+                        current_quantity * float(old_avg) + notional
+                    ) / new_quantity
+                cash -= notional
+            else:
+                if current_quantity < quantity:
+                    raise MockAccountError(
+                        "mock account has insufficient position", "INSUFFICIENT_POSITION"
+                    )
+                new_quantity = current_quantity - quantity
+                avg_price = position.get("avg_price")
+                cash += notional
+
+            if new_quantity:
+                positions[stk_code] = {
+                    "quantity": new_quantity,
+                    "avg_price": avg_price,
+                }
+            else:
+                positions.pop(stk_code, None)
+            updated_at = _now()
+            conn.execute(
+                """
+                UPDATE mock_accounts
+                SET cash = ?, positions = ?, updated_at = ?
+                WHERE account = ?
+                """,
+                (cash, _json_dumps(positions), updated_at, account),
+            )
+            return {
+                "account": account,
+                "cash": cash,
+                "positions": positions,
+                "created_at": row["created_at"],
+                "updated_at": updated_at,
+            }
+
 
     def save_snapshot(self, kind: str, payload: Any, account: str | None = None) -> None:
         """Persist the latest successful snapshot payload for ``kind``."""

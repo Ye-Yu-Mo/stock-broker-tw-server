@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import uuid
 from typing import Any
 
@@ -13,6 +14,8 @@ from stock_broker_tw.audit import AuditLogger
 from stock_broker_tw.config import Settings
 from stock_broker_tw.metrics import metrics
 from stock_broker_tw.yuanta.adapter import YuantaAdapter, YuantaAdapterError
+
+logger = logging.getLogger(__name__)
 
 
 class SessionError(Exception):
@@ -80,6 +83,12 @@ class SessionService:
         )
 
         try:
+            logger.debug(
+                "session login dispatch: request_id=%s environment=%s method=%s",
+                request_id,
+                self.settings.yuanta.environment,
+                "pfx" if pfx_path else "password",
+            )
             self.adapter.open()
             self._clear_login_result(self.adapter)
             accepted = self.adapter.login(
@@ -87,6 +96,13 @@ class SessionService:
                 password,
                 pfx_path=pfx_path,
                 pfx_pass=pfx_pass,
+            )
+            logger.debug(
+                "session login dispatch result: request_id=%s accepted=%s opened=%s logged_in=%s",
+                request_id,
+                bool(accepted),
+                getattr(self.adapter, "opened", None),
+                getattr(self.adapter, "logged_in", None),
             )
         except YuantaAdapterError as exc:
             metrics.login_attempts_total.labels(result="error").inc()
@@ -104,6 +120,12 @@ class SessionService:
             ) from exc
 
         if not accepted:
+            logger.warning(
+                "session login rejected by adapter: request_id=%s accepted=False opened=%s logged_in=%s",
+                request_id,
+                getattr(self.adapter, "opened", None),
+                getattr(self.adapter, "logged_in", None),
+            )
             metrics.login_attempts_total.labels(result="error").inc()
             self.audit.record(
                 "session.login",
@@ -114,9 +136,24 @@ class SessionService:
             )
             raise SessionError("login request was rejected", code="LOGIN_REJECTED", status_code=502)
 
+        logger.debug(
+            "waiting for Login response: request_id=%s timeout=%.1fs",
+            request_id,
+            self.settings.yuanta.login_timeout,
+        )
         try:
             result = await self._wait_for_login_result(self.adapter, self.settings.yuanta.login_timeout)
+            logger.debug(
+                "Login response cache populated: request_id=%s login_entries=%s",
+                request_id,
+                len(result.get("login_list") or []),
+            )
         except TimeoutError as exc:
+            logger.warning(
+                "Login response timeout: request_id=%s timeout=%.1fs",
+                request_id,
+                self.settings.yuanta.login_timeout,
+            )
             metrics.login_attempts_total.labels(result="timeout").inc()
             self.audit.record(
                 "session.login",
@@ -131,17 +168,33 @@ class SessionService:
             status = result.get("login_status") or {}
             message = status.get("msg_content") or "login failed"
             code = str(status.get("msg_code") or "LOGIN_FAILED")
+            logger.warning(
+                "Login response indicates failure: request_id=%s msg_code=%s msg_content_present=%s login_entries=%s",
+                request_id,
+                code,
+                bool(status.get("msg_content")),
+                len(login_list),
+            )
             metrics.login_attempts_total.labels(result="error").inc()
             self.audit.record(
                 "session.login",
                 result="error",
                 request_id=request_id,
                 account=account,
-                error=message,
-                login_status=status,
+                error=f"login failed ({code})",
+                login_status={
+                    "msg_code": code,
+                    "msg_content_present": bool(status.get("msg_content")),
+                    "count": status.get("count"),
+                },
             )
             raise SessionError(message, code=code, status_code=401)
 
+        logger.info(
+            "Login response indicates success: request_id=%s login_entries=%s",
+            request_id,
+            len(login_list),
+        )
         metrics.login_attempts_total.labels(result="success").inc()
         self.audit.record(
             "session.login",

@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from pathlib import Path
 from typing import Any, Self
 
 from stock_broker_tw.yuanta import loader
@@ -108,6 +109,12 @@ class YuantaAdapter:
         if self._opened:
             return
 
+        logger.debug(
+            "Yuanta Open() request: environment=%s log_type=%s pmm_server_check=%s",
+            self._environment,
+            self._log_type,
+            self._pmm_server_check,
+        )
         if self._trader is None:
             self._trader = loader.create_trader(
                 environment=self._environment,
@@ -122,6 +129,7 @@ class YuantaAdapter:
         self._trader.Open(mode)
         self._opened = True
         self._closed = False
+        logger.debug("Yuanta Open() completed: opened=%s", self._opened)
 
     def login(
         self,
@@ -143,11 +151,33 @@ class YuantaAdapter:
         if self._trader is None:
             raise YuantaAdapterError("trader is not available")
 
-        if pfx_path:
-            result = self._trader.Login(pfx_path, pfx_pass, account, password)
-        else:
-            result = self._trader.Login(account, password)
+        method = "pfx" if pfx_path else "password"
+        pfx_name = Path(pfx_path).name if pfx_path else None
+        logger.debug(
+            "Yuanta Login() request: environment=%s method=%s account_present=%s pfx_name=%s",
+            self._environment,
+            method,
+            bool(account),
+            pfx_name,
+        )
+        try:
+            if pfx_path:
+                result = self._trader.Login(pfx_path, pfx_pass, account, password)
+            else:
+                result = self._trader.Login(account, password)
+        except Exception as exc:
+            logger.error(
+                "Yuanta Login() raised: exception_type=%s",
+                type(exc).__name__,
+            )
+            raise
         self._logged_in = bool(result)
+        logger.debug(
+            "Yuanta Login() result: accepted=%s opened=%s logged_in=%s",
+            bool(result),
+            self._opened,
+            self._logged_in,
+        )
         return bool(result)
 
     def logout(self) -> bool:
@@ -250,15 +280,30 @@ class YuantaAdapter:
                 response_id = self._extract_response_request_id(data)
 
         if str_index == "Login":
+            logger.debug(
+                "Login response received: int_mark=%s dw_index=%s",
+                int_mark,
+                dw_index,
+            )
             try:
                 login_data = login_result_to_dict(obj_value)
                 self._last_login_result = login_data
+                login_status = login_data.get("login_status") or {}
+                logger.debug(
+                    "Login response parsed: msg_code=%s msg_content_present=%s login_entries=%s",
+                    login_status.get("msg_code"),
+                    bool(login_status.get("msg_content")),
+                    len(login_data.get("login_list") or []),
+                )
                 if login_data.get("login_list"):
                     self._logged_in = True
                 else:
                     self._logged_in = False
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.error(
+                    "failed to parse Login response: exception_type=%s",
+                    type(exc).__name__,
+                )
 
         event = YuantaEvent(
             int_mark=int_mark,

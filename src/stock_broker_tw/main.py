@@ -120,6 +120,7 @@ def create_app(
         rate_limiter=rate_limiter,
         circuit_breaker=circuit_breaker,
         notifier=notifier,
+        query_service=query_service,
     )
     report_handler = ReportHandler(state_store, broadcaster=ws_manager, notifier=notifier)
 
@@ -150,7 +151,7 @@ def create_app(
 
     app = FastAPI(
         title="stock-broker-tw-server",
-        version="0.1.0",
+        version="0.1.2",
         lifespan=lifespan,
     )
     session_service.on_login_success = recover_after_login
