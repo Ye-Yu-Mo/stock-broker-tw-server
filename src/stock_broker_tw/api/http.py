@@ -185,7 +185,7 @@ async def health(request: Request) -> dict[str, Any]:
         "event_queue_size": event_queue_size,
         "audit_enabled": settings.audit.enabled,
         "audit_file": settings.audit.file,
-        "version": "0.1.1",
+        "version": "0.1.2",
         "environment": settings.yuanta.environment,
         "panic": bool(getattr(risk_engine, "panic", False)) if risk_engine is not None else False,
         "circuit_breaker_open": bool(getattr(circuit_breaker, "is_open", False)) if circuit_breaker is not None else False,
