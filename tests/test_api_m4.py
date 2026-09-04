@@ -58,6 +58,19 @@ class FakeAdapter:
             ],
         }
 
+    def query(self, function_name: str, **params):
+        if function_name == "GetWatchListAll":
+            return {
+                "query_watch_list": [
+                    {
+                        "stk_code": params["QuoteList"][0]["stock_code"],
+                        "buy_price": 99.0,
+                        "sell_price": 101.0,
+                    }
+                ]
+            }
+        return {}
+
 
 def make_client(tmp_path: Path, adapter: FakeAdapter | None = None, risk: RiskConfig | None = None):
     adapter = adapter or FakeAdapter()
@@ -152,7 +165,91 @@ def test_risk_rejected_returns_400_and_no_adapter_call(tmp_path: Path) -> None:
         assert adapter.calls == []
 
 
-def test_websocket_receives_real_report_and_order_updated(tmp_path: Path) -> None:
+def test_mock_order_skips_adapter_and_fills(tmp_path: Path) -> None:
+    client, adapter = make_client(tmp_path)
+    with client:
+        initialized = client.post(
+            "/api/v1/mock/accounts/init",
+            json={"account": "S98875005091", "cash": 100_000.0, "positions": []},
+            headers=auth(),
+        )
+        assert initialized.status_code == 200, initialized.text
+        res = client.post(
+            "/api/v1/orders/stock",
+            json={
+                "client_order_id": "MOCK-API-001",
+                "stk_code": "2330",
+                "side": "B",
+                "price": 500.0,
+                "quantity": 10,
+                "account": "S98875005091",
+                "mock": True,
+            },
+            headers=auth(),
+        )
+
+        assert res.status_code == 200, res.text
+        body = res.json()["data"]
+        assert body["status"] == "FILLED"
+        assert body["order_no"].startswith("MOCK-")
+        assert body["avg_price"] == 101.0
+        assert body["filled_qty"] == 10
+        assert adapter.calls == []
+
+
+def test_mock_account_init_and_order_uses_ask1(tmp_path: Path) -> None:
+    client, adapter = make_client(tmp_path)
+    with client:
+        initialized = client.post(
+            "/api/v1/mock/accounts/init",
+            json={
+                "account": "MOCK-API",
+                "cash": 10_000.0,
+                "positions": [],
+            },
+            headers=auth(),
+        )
+        assert initialized.status_code == 200, initialized.text
+        assert initialized.json()["data"]["cash"] == 10_000.0
+
+        with client.websocket_connect("/ws?token=test-token") as ws:
+            assert ws.receive_json()["type"] == "welcome"
+            res = client.post(
+                "/api/v1/orders/stock",
+                json={
+                    "client_order_id": "MOCK-API-002",
+                    "stk_code": "2330",
+                    "side": "B",
+                    "price": 1.0,
+                    "quantity": 10,
+                    "account": "MOCK-API",
+                    "mock": True,
+                },
+                headers=auth(),
+            )
+            assert res.status_code == 200, res.text
+            body = res.json()["data"]
+            assert body["status"] == "FILLED"
+            assert body["avg_price"] == 101.0
+            assert body["data"]["ask1"] == 101.0
+            assert body["data"]["mock"] is True
+
+            updates = []
+            for _ in range(2):
+                message = ws.receive_json()
+                if message["type"] == "order.updated":
+                    updates.append(message["data"])
+            assert any(update["status"] == "FILLED" for update in updates)
+
+        listed = client.get(
+            "/api/v1/orders?account=MOCK-API",
+            headers=auth(),
+        )
+        assert listed.status_code == 200
+        assert listed.json()["data"][0]["status"] == "FILLED"
+        assert adapter.calls == []
+
+
     client, adapter = make_client(tmp_path)
     with client:
         # Persist an accepted order before feeding the report.

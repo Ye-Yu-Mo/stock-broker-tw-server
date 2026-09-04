@@ -48,6 +48,7 @@ webhook_type = "generic"
 # 飞书机器人开启签名校验时填写
 secret = ""
 timeout = 3.0
+risk_rejection_dedupe_seconds = 60.0
 
 # 可配置的报警事件：enabled 控制是否推送，title 覆盖默认标题，template 支持 {字段名} 占位。
 [notify.events]

@@ -115,6 +115,7 @@ class NotifyConfig(BaseModel):
     webhook_type: str = "generic"
     secret: str = ""
     timeout: float = 3.0
+    risk_rejection_dedupe_seconds: float = 60.0
     events: dict[str, NotifyEventConfig] = {}
 
 

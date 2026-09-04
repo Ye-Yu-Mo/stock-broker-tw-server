@@ -41,6 +41,23 @@ class StockOrderPayload(BaseModel):
     trade_date: str | None = None
     new_price: float | None = None
     new_quantity: int | None = None
+    mock: bool = False
+
+
+class MockPositionPayload(BaseModel):
+    """Initial position held by a simulated account."""
+
+    stk_code: str = Field(..., min_length=1)
+    quantity: int = Field(0, ge=0)
+    avg_price: float | None = Field(None, ge=0)
+
+
+class MockAccountInitPayload(BaseModel):
+    """Body for initializing a server-maintained simulated account."""
+
+    account: str = Field(..., min_length=1, max_length=64)
+    cash: float = Field(..., ge=0)
+    positions: list[MockPositionPayload] = Field(default_factory=list)
 
 
 class QuoteSubscribePayload(BaseModel):
@@ -577,6 +594,41 @@ async def stocks_info(
         )
     except QueryError as exc:
         _raise_query_error(exc)
+
+
+@router.post("/api/v1/mock/accounts/init", dependencies=[Depends(require_token)])
+async def init_mock_account(
+    request: Request,
+    payload: MockAccountInitPayload,
+) -> dict[str, Any]:
+    service = get_broker_service(request)
+    try:
+        result = service.init_mock_account(
+            payload.account,
+            payload.cash,
+            [position.model_dump() for position in payload.positions],
+        )
+    except BrokerServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": exc.message, "detail": exc.detail},
+        ) from exc
+    return ok(result)
+
+
+@router.get("/api/v1/mock/accounts/{account}", dependencies=[Depends(require_token)])
+async def get_mock_account(request: Request, account: str) -> dict[str, Any]:
+    result = get_broker_service(request).get_mock_account(account)
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "MOCK_ACCOUNT_NOT_FOUND",
+                "message": "mock account not found",
+                "detail": {"account": account},
+            },
+        )
+    return ok(result)
 
 
 @router.post("/api/v1/orders/stock", dependencies=[Depends(require_token)])

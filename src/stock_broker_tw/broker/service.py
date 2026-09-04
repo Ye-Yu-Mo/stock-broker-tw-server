@@ -11,7 +11,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
+import math
+import threading
+import time
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from stock_broker_tw.audit import AuditLogger
@@ -32,7 +37,9 @@ from stock_broker_tw.metrics import metrics
 from stock_broker_tw.risk.circuit_breaker import CircuitBreaker
 from stock_broker_tw.risk.rate_limit import RateLimiter
 from stock_broker_tw.risk.rules import RiskEngine, RiskError
-from stock_broker_tw.state.store import StateStore
+from stock_broker_tw.state.store import MockAccountError, StateStore
+
+logger = logging.getLogger(__name__)
 
 
 class BrokerServiceError(Exception):
@@ -76,6 +83,7 @@ class BrokerService:
         rate_limiter: RateLimiter | None = None,
         circuit_breaker: CircuitBreaker | None = None,
         notifier: Any = None,
+        query_service: Any = None,
     ) -> None:
         self.adapter = adapter
         self.settings = settings
@@ -85,6 +93,7 @@ class BrokerService:
         self.risk = risk or RiskEngine(settings, notifier=notifier)
         self.broadcaster = broadcaster
         self.notifier = notifier
+        self.query_service = query_service
         self.rate_limiter = rate_limiter or RateLimiter(
             max_per_second=settings.rate_limit.trade_per_second,
             max_per_minute=settings.rate_limit.trade_per_minute,
@@ -95,16 +104,61 @@ class BrokerService:
             notifier=notifier,
         )
         self._state_machine = OrderStateMachine()
+        self._risk_alert_lock = threading.Lock()
+        self._risk_alerts: dict[tuple[str, str], float] = {}
+        self._risk_alert_window = max(
+            0.0,
+            float(getattr(settings.notify, "risk_rejection_dedupe_seconds", 60.0)),
+        )
 
     # -- public API ---------------------------------------------------------
+
+    def init_mock_account(
+        self,
+        account: str,
+        cash: float,
+        positions: Any = None,
+    ) -> dict[str, Any]:
+        try:
+            return self.store.init_mock_account(account, cash, positions)
+        except MockAccountError as exc:
+            raise BrokerServiceError(
+                exc.message,
+                code=exc.code,
+                status_code=400,
+            ) from exc
+
+    def get_mock_account(self, account: str) -> dict[str, Any] | None:
+        return self.store.get_mock_account(account)
 
     async def place_stock_order(
         self,
         request: StockOrderRequest | dict[str, Any],
         request_id: str | None = None,
     ) -> dict[str, Any]:
+        mock = bool(request.get("mock", False)) if isinstance(request, dict) else False
+        raw_account = request.get("account") if isinstance(request, dict) else None
+        if mock and not raw_account:
+            raise BrokerServiceError(
+                "mock orders require an initialized mock account",
+                code="MOCK_ACCOUNT_REQUIRED",
+                status_code=400,
+            )
         req = StockOrderRequest.from_dict(request)
         self._ensure_account(req)
+        if mock:
+            if self.store.get_mock_account(req.account) is None:
+                raise BrokerServiceError(
+                    f"mock account not found: {req.account}",
+                    code="MOCK_ACCOUNT_NOT_FOUND",
+                    status_code=404,
+                )
+        elif self.store.get_mock_account(req.account) is not None:
+            raise BrokerServiceError(
+                "mock account requires mock=true",
+                code="MOCK_ACCOUNT_REQUIRES_MOCK",
+                status_code=400,
+            )
         request_id = request_id or str(uuid.uuid4())
         existing = self.store.get_stock_order(req.client_order_id)
         if existing is not None and existing.get("action") == req.action.value:
@@ -128,7 +182,7 @@ class BrokerService:
         )
         self._save_pending(req)
         try:
-            await self.queue.submit(req.account, lambda: self._execute_new(req, request_id))
+            await self.queue.submit(req.account, lambda: self._execute_new(req, request_id, mock=mock))
         except RiskError:
             raise
         except Exception as exc:
@@ -314,7 +368,7 @@ class BrokerService:
             return await self.cancel_stock_order(req, request_id=request_id)
         if action == OrderAction.REPLACE.value:
             return await self.replace_stock_order(req, request_id=request_id)
-        return await self.place_stock_order(req, request_id=request_id)
+        return await self.place_stock_order(request, request_id=request_id)
 
     async def place_order(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """Alias for :meth:`place_stock_order`."""
@@ -375,16 +429,7 @@ class BrokerService:
                 error=exc.message,
                 code=exc.code,
             )
-            self._notify(
-                "risk.rejected",
-                "风控拒绝",
-                {
-                    "client_order_id": req.client_order_id,
-                    "action": action,
-                    "code": exc.code,
-                    "message": exc.message,
-                },
-            )
+            self._notify_risk_rejection(req, action, exc.code, exc.message)
             raise
 
     def _check_write_circuit(self, client_order_id: str) -> None:
@@ -418,7 +463,13 @@ class BrokerService:
                 account=req.account,
                 client_order_id=req.client_order_id,
                 function="SendStockOrder",
-                action=action,
+                order_action=action,
+            )
+            self._notify_risk_rejection(
+                req,
+                action,
+                "RATE_LIMITED",
+                "RATE_LIMITED: trade rate limit exceeded",
             )
             raise BrokerServiceError(
                 "trade rate limit exceeded",
@@ -436,6 +487,54 @@ class BrokerService:
                 method(event, title, fields)
         except Exception:
             pass
+
+    def _notify_risk_rejection(
+        self,
+        req: StockOrderRequest,
+        action: str,
+        code: str,
+        reason: str,
+    ) -> None:
+        """Send one deduplicated alert without affecting the rejection path."""
+        if self.notifier is None:
+            return
+        key = (req.client_order_id, f"{code}:{reason}")
+        now = time.monotonic()
+        with self._risk_alert_lock:
+            previous = self._risk_alerts.get(key)
+            if (
+                self._risk_alert_window > 0
+                and previous is not None
+                and now - previous < self._risk_alert_window
+            ):
+                metrics.notifications_suppressed_total.labels(event="risk.rejected").inc()
+                return
+            self._risk_alerts[key] = now
+            if len(self._risk_alerts) > 4096:
+                cutoff = now - self._risk_alert_window
+                self._risk_alerts = {
+                    alert_key: sent_at
+                    for alert_key, sent_at in self._risk_alerts.items()
+                    if sent_at >= cutoff
+                }
+
+        fields = {
+            "client_order_id": req.client_order_id,
+            "account": req.account,
+            "stk_code": req.stk_code,
+            "side": self._side_value(req.side),
+            "price": req.price,
+            "quantity": req.quantity,
+            "action": action,
+            "code": code,
+            "reason": reason,
+        }
+        try:
+            self.notifier.send("risk.rejected", "风控拒绝", fields)
+        except Exception as exc:
+            # Notifier implementations are expected to be best-effort, but a
+            # custom notifier must not be able to turn a rejection into success.
+            logger.warning("risk rejection notification failed: %s", exc)
 
     def _save_pending(self, req: StockOrderRequest) -> None:
         req.trade_date = self._date_to_str(req.trade_date)
@@ -569,7 +668,15 @@ class BrokerService:
             status_code=404,
         )
 
-    async def _execute_new(self, req: StockOrderRequest, request_id: str | None = None) -> None:
+    async def _execute_new(
+        self,
+        req: StockOrderRequest,
+        request_id: str | None = None,
+        mock: bool = False,
+    ) -> None:
+        if mock:
+            await self._execute_mock(req, request_id=request_id)
+            return
         await self._update_status(req.client_order_id, OrderStatus.SUBMITTED.value, reason="sending to broker")
         response = await self._call_send(req, request_id=request_id)
         result = self._first_result(response)
@@ -637,6 +744,192 @@ class BrokerService:
             reason="broker accepted order",
         )
         self._save_m3_order(req, order_no, trade_date)
+
+    async def _execute_mock(
+        self,
+        req: StockOrderRequest,
+        request_id: str | None = None,
+    ) -> None:
+        """Fill a new order locally using the current opposing quote."""
+        try:
+            if self.query_service is None:
+                raise BrokerServiceError(
+                    "mock quote service is unavailable",
+                    code="MOCK_QUOTE_UNAVAILABLE",
+                    status_code=503,
+                )
+            snapshot = await self.query_service.watchlist_snapshot(
+                stk_code=req.stk_code,
+                market_type="TWSE",
+                # Market data is read through the configured real session; the
+                # mock account must never be sent to Spark API as a real account.
+                account=self.settings.account.account,
+                request_id=request_id,
+            )
+            bid1, ask1 = self._mock_quote_prices(snapshot, req.stk_code)
+            fill_price = ask1 if self._side_value(req.side) == "B" else bid1
+            now = datetime.now(UTC)
+            order_no = f"MOCK-{uuid.uuid4()}"
+            trade_date = now.strftime("%Y/%m/%d")
+            mock_data = {
+                "mock": True,
+                "execution": "simulated",
+                "bid1": bid1,
+                "ask1": ask1,
+                "fill_price": fill_price,
+                "filled_qty": req.quantity,
+                "avg_price": fill_price,
+                "timestamp": now.isoformat(),
+            }
+            self.store.apply_mock_fill(
+                account=req.account,
+                side=self._side_value(req.side),
+                stk_code=req.stk_code,
+                quantity=req.quantity,
+                price=fill_price,
+            )
+        except MockAccountError as exc:
+            await self._update_status(
+                req.client_order_id,
+                OrderStatus.REJECTED.value,
+                data={"mock": True},
+                error=exc.message,
+                reason="mock account rejected fill",
+            )
+            self._notify_risk_rejection(req, "place", exc.code, exc.message)
+            raise BrokerServiceError(
+                exc.message,
+                code=exc.code,
+                status_code=409,
+            ) from exc
+        except BrokerServiceError as exc:
+            await self._update_status(
+                req.client_order_id,
+                OrderStatus.REJECTED.value,
+                data={"mock": True},
+                error=exc.message,
+                reason="mock quote unavailable",
+            )
+            raise
+        except Exception as exc:
+            await self._update_status(
+                req.client_order_id,
+                OrderStatus.REJECTED.value,
+                data={"mock": True},
+                error=str(exc),
+                reason="mock quote unavailable",
+            )
+            raise BrokerServiceError(
+                str(exc),
+                code="MOCK_QUOTE_UNAVAILABLE",
+                status_code=502,
+            ) from exc
+
+        await self._update_status(
+            req.client_order_id,
+            OrderStatus.ACCEPTED.value,
+            order_no=order_no,
+            trade_date=trade_date,
+            data=mock_data,
+            reason="mock order accepted",
+        )
+        await self._update_status(
+            req.client_order_id,
+            OrderStatus.FILLED.value,
+            order_no=order_no,
+            trade_date=trade_date,
+            data=mock_data,
+            reason="mock order filled",
+        )
+        self._save_m3_order(req, order_no, trade_date)
+
+    @staticmethod
+    def _mock_quote_prices(snapshot: Any, stk_code: str) -> tuple[float, float]:
+        rows: Any = snapshot
+        if isinstance(snapshot, dict):
+            for key in ("query_watch_list", "watchlist", "quote_list", "items"):
+                if isinstance(snapshot.get(key), list):
+                    rows = snapshot[key]
+                    break
+            else:
+                nested = snapshot.get("data")
+                if isinstance(nested, (dict, list)):
+                    return BrokerService._mock_quote_prices(nested, stk_code)
+        if isinstance(rows, dict):
+            rows = [rows]
+        if not isinstance(rows, list):
+            raise BrokerServiceError(
+                "mock quote response has no quote rows",
+                code="MOCK_QUOTE_UNAVAILABLE",
+                status_code=502,
+            )
+
+        row = next(
+            (
+                item
+                for item in rows
+                if isinstance(item, dict)
+                and str(
+                    item.get("stk_code", item.get("stock_code", item.get("symbol", "")))
+                )
+                == str(stk_code)
+            ),
+            None,
+        )
+        if row is None:
+            raise BrokerServiceError(
+                f"mock quote not found for {stk_code}",
+                code="MOCK_QUOTE_UNAVAILABLE",
+                status_code=502,
+            )
+
+        bid1 = BrokerService._mock_quote_field(
+            row,
+            "bid1",
+            "buy_price1",
+            "buy_price",
+            "BidPrice1",
+            "BuyPrice1",
+            "BuyPrice",
+        )
+        ask1 = BrokerService._mock_quote_field(
+            row,
+            "ask1",
+            "sell_price1",
+            "sell_price",
+            "AskPrice1",
+            "SellPrice1",
+            "SellPrice",
+        )
+        try:
+            bid1 = float(bid1)
+            ask1 = float(ask1)
+        except (TypeError, ValueError) as exc:
+            raise BrokerServiceError(
+                f"mock quote has invalid prices for {stk_code}",
+                code="MOCK_QUOTE_UNAVAILABLE",
+                status_code=502,
+            ) from exc
+        if not math.isfinite(bid1) or not math.isfinite(ask1) or bid1 <= 0 or ask1 <= 0:
+            raise BrokerServiceError(
+                f"mock quote has unavailable prices for {stk_code}",
+                code="MOCK_QUOTE_UNAVAILABLE",
+                status_code=502,
+            )
+        return bid1, ask1
+
+    @staticmethod
+    def _mock_quote_field(row: dict[str, Any], *keys: str) -> Any:
+        containers = [row]
+        for key in ("index_flag_50", "IndexFlag_50", "five_tick", "five_tick_a"):
+            nested = row.get(key)
+            if isinstance(nested, dict):
+                containers.append(nested)
+        for container in containers:
+            for key in keys:
+                if container.get(key) is not None:
+                    return container[key]
+        return None
 
     async def _execute_cancel(self, req: StockOrderRequest, request_id: str | None = None) -> None:
         await self._update_status(req.client_order_id, OrderStatus.SUBMITTED.value, reason="sending cancel")

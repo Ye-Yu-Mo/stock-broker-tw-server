@@ -120,6 +120,7 @@ def create_app(
         rate_limiter=rate_limiter,
         circuit_breaker=circuit_breaker,
         notifier=notifier,
+        query_service=query_service,
     )
     report_handler = ReportHandler(state_store, broadcaster=ws_manager, notifier=notifier)
 

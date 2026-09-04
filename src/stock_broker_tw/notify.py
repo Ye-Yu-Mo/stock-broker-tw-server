@@ -25,6 +25,8 @@ import urllib.request
 from datetime import UTC, datetime
 from typing import Any
 
+from stock_broker_tw.metrics import metrics
+
 logger = logging.getLogger(__name__)
 
 
@@ -105,6 +107,14 @@ class Notifier:
         self.timeout = timeout
 
     @staticmethod
+    def _record_sent(event: str) -> None:
+        metrics.notifications_sent_total.labels(event=event).inc()
+
+    @staticmethod
+    def _record_failed(event: str) -> None:
+        metrics.notifications_failed_total.labels(event=event).inc()
+
+    @staticmethod
     def _severity_for(event: str, fields: dict[str, Any]) -> Any:
         """Map broker events to lark_alert card severity levels."""
         from lark_alert import Severity
@@ -173,9 +183,11 @@ class Notifier:
                     for key, value in fields.items():
                         card.field(str(key), str(value))
                     alert.send_card(card)
+                    self._record_sent(event)
                     return True
                 except Exception as exc:  # noqa: BLE001 - notification must be best-effort
                     logger.warning("notify lark_alert card failed: %s", exc)
+                    self._record_failed(event)
                     return False
 
         payload = build_payload(event, resolved_title, fields, self.webhook_type, text=text)
@@ -190,9 +202,11 @@ class Notifier:
             # A 2xx is enough; urllib raises HTTPError for non-2xx responses.
             with urllib.request.urlopen(request, timeout=self.timeout):  # noqa: S310
                 pass
+            self._record_sent(event)
             return True
         except Exception as exc:  # noqa: BLE001 - notification must be best-effort
             logger.warning("notify webhook failed: %s", exc)
+            self._record_failed(event)
             return False
 
     async def asend(self, event: str, title: str, fields: dict[str, Any] | None = None) -> bool:
