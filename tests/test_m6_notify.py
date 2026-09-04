@@ -109,6 +109,8 @@ def test_notifier_uses_lark_alert_card_when_installed() -> None:
     assert card.kwargs["service"] == "stock-broker-tw-server"
     assert card.kwargs["node"] == "local"
     assert card.data["title"] == "订单状态变化"
+    assert card.data["summary"] == "order.status · C001"
+    assert card.data["details"] is None
     data = json.loads(card.to_json())
     assert data["msg_type"] == "interactive"
 

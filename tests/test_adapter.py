@@ -25,6 +25,8 @@ class FakeTrader:
         self.log_type = None
         self.pmm_server_check = None
         self.mode = None
+        self.login_result = True
+        self.login_error: Exception | None = None
 
     def Open(self, mode) -> None:
         self.mode = mode
@@ -42,7 +44,9 @@ class FakeTrader:
 
     def Login(self, *args) -> bool:
         self.login_args = args
-        return True
+        if self.login_error is not None:
+            raise self.login_error
+        return self.login_result
 
     def SetLogType(self, log_type) -> None:
         self.log_type = log_type
@@ -83,7 +87,77 @@ def test_pfx_login_uses_four_argument_form() -> None:
     assert trader.login_args == ("/tmp/a.pfx", "yuanta", "S98875005091", "1234")
 
 
-def test_login_before_open_raises() -> None:
+def test_login_false_logs_result_without_credentials(caplog) -> None:
+    adapter, trader = make_adapter(environment="PROD")
+    trader.login_result = False
+    adapter.open()
+
+    with caplog.at_level("DEBUG", logger="stock_broker_tw.yuanta.adapter"):
+        assert adapter.login(
+            "S98875005091",
+            "password-secret",
+            pfx_path="/private/account.pfx",
+            pfx_pass="pfx-secret",
+        ) is False
+
+    assert "accepted=False" in caplog.text
+    assert "environment=PROD" in caplog.text
+    assert "password-secret" not in caplog.text
+    assert "pfx-secret" not in caplog.text
+
+
+def test_login_exception_logs_type_without_credentials(caplog) -> None:
+    adapter, trader = make_adapter()
+    trader.login_error = RuntimeError("password-secret pfx-secret")
+    adapter.open()
+
+    with (
+        caplog.at_level("DEBUG", logger="stock_broker_tw.yuanta.adapter"),
+        pytest.raises(RuntimeError),
+    ):
+        adapter.login(
+            "S98875005091",
+            "password-secret",
+            pfx_path="/private/account.pfx",
+            pfx_pass="pfx-secret",
+        )
+
+    assert "Login() raised" in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert "password-secret" not in caplog.text
+    assert "pfx-secret" not in caplog.text
+
+
+def test_login_response_logs_safe_status(caplog) -> None:
+    adapter, trader = make_adapter()
+    adapter.open()
+    result = types.SimpleNamespace(
+        LoginStatus=types.SimpleNamespace(MsgCode="9999", MsgContent="login failed", Count=0),
+        LoginList=[],
+    )
+
+    with caplog.at_level("DEBUG", logger="stock_broker_tw.yuanta.adapter"):
+        trader.OnResponse[0](1, 7, "Login", None, result)
+
+    assert "Login response received" in caplog.text
+    assert "msg_code=9999" in caplog.text
+    assert "login_entries=0" in caplog.text
+    assert "login failed" not in caplog.text
+
+
+def test_login_response_parse_failure_is_logged(caplog, monkeypatch) -> None:
+    adapter, trader = make_adapter()
+    adapter.open()
+
+    def fail_parse(_value):
+        raise ValueError("bad login payload")
+
+    monkeypatch.setattr("stock_broker_tw.yuanta.adapter.login_result_to_dict", fail_parse)
+    with caplog.at_level("DEBUG", logger="stock_broker_tw.yuanta.adapter"):
+        trader.OnResponse[0](1, 7, "Login", None, object())
+
+    assert "failed to parse Login response" in caplog.text
+    assert "ValueError" in caplog.text
     adapter, _ = make_adapter()
     with pytest.raises(YuantaAdapterError, match="open"):
         adapter.login("S98875005091", "1234")

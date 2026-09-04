@@ -167,6 +167,9 @@ class Notifier:
                         timeout_secs=int(self.timeout),
                         max_retries=1,
                     )
+                    summary = event
+                    if fields.get("client_order_id"):
+                        summary = f"{event} · {fields['client_order_id']}"
                     card = (
                         Card(
                             service="stock-broker-tw-server",
@@ -176,9 +179,8 @@ class Notifier:
                         )
                         .severity(self._severity_for(event, fields))
                         .title(resolved_title)
-                        .summary(text.splitlines()[0] if text else resolved_title)
+                        .summary(summary)
                         .environment(str(fields.get("environment") or "unknown"))
-                        .details(text)
                     )
                     for key, value in fields.items():
                         card.field(str(key), str(value))
