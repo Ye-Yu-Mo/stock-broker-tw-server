@@ -86,6 +86,20 @@ class AcceptedNoResponseAdapter(FakeAdapter):
         return True
 
 
+class ReadyGateAdapter(FakeAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.steps: list[str] = []
+
+    def wait_until_ready(self, timeout: float = 15.0) -> bool:
+        self.steps.append("ready")
+        return True
+
+    def login(self, account: str, password: str, pfx_path=None, pfx_pass=None) -> bool:
+        self.steps.append("login")
+        return super().login(account, password, pfx_path, pfx_pass)
+
+
 def make_service(adapter: FakeAdapter | None = None) -> tuple[SessionService, FakeAdapter]:
     adapter = adapter or FakeAdapter()
     settings = Settings(
@@ -116,11 +130,28 @@ def test_login_accepts_explicit_credentials() -> None:
     service, adapter = make_service()
     result = run(
         service.login(
-            LoginCredentials(account="S111", password="p", pfx_path="/tmp/a.pfx", pfx_pass="x")
+            LoginCredentials(account="S98875005091", password="p", pfx_path="/tmp/a.pfx", pfx_pass="x")
         )
     )
     assert result["login_list"][0]["account"] == "S98875005091"
-    assert adapter.login_args == ("S111", "p", "/tmp/a.pfx", "x")
+    assert adapter.login_args == ("S98875005091", "p", "/tmp/a.pfx", "x")
+
+
+def test_login_waits_for_trading_host_before_dispatch() -> None:
+    adapter = ReadyGateAdapter()
+    service, _ = make_service(adapter)
+
+    run(service.login(LoginCredentials()))
+
+    assert adapter.steps == ["ready", "login"]
+
+
+def test_login_rejects_non_default_account() -> None:
+    service, adapter = make_service()
+    with pytest.raises(SessionError) as exc_info:
+        run(service.login(LoginCredentials(account="S00000000000", password="p")))
+    assert exc_info.value.code == "ACCOUNT_NOT_ALLOWED"
+    assert adapter.login_args is None
 
 
 def test_login_rejected_raises_session_error(caplog) -> None:
@@ -129,7 +160,7 @@ def test_login_rejected_raises_session_error(caplog) -> None:
         caplog.at_level("DEBUG", logger="stock_broker_tw.service.session"),
         pytest.raises(SessionError) as exc_info,
     ):
-        run(service.login(LoginCredentials(account="A", password="P")))
+        run(service.login(LoginCredentials(account="S98875005091", password="P")))
     assert exc_info.value.code == "LOGIN_REJECTED"
     assert "accepted=False" in caplog.text
 
@@ -137,7 +168,7 @@ def test_login_rejected_raises_session_error(caplog) -> None:
 def test_login_failure_result_raises_session_error() -> None:
     service, _ = make_service(FakeAdapter(success=False))
     with pytest.raises(SessionError) as exc_info:
-        run(service.login(LoginCredentials(account="A", password="P")))
+        run(service.login(LoginCredentials(account="S98875005091", password="P")))
     assert "密碼錯誤" in str(exc_info.value)
 
 
@@ -147,7 +178,7 @@ def test_login_accepted_without_response_logs_wait_and_times_out(caplog) -> None
         caplog.at_level("DEBUG", logger="stock_broker_tw.service.session"),
         pytest.raises(SessionError) as exc_info,
     ):
-        run(service.login(LoginCredentials(account="A", password="P")))
+        run(service.login(LoginCredentials(account="S98875005091", password="P")))
     assert exc_info.value.code == "LOGIN_TIMEOUT"
     assert "accepted=True" in caplog.text
     assert "Login response" in caplog.text

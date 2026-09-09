@@ -10,6 +10,7 @@ The service is responsible for:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import logging
 import math
@@ -23,6 +24,7 @@ from stock_broker_tw.audit import AuditLogger
 from stock_broker_tw.config import Settings
 from stock_broker_tw.engine.queue import SerialOrderQueue
 from stock_broker_tw.engine.state import (
+    ApCode,
     InvalidOrderStateTransition,
     OrderAction,
     OrderSide,
@@ -37,7 +39,8 @@ from stock_broker_tw.metrics import metrics
 from stock_broker_tw.risk.circuit_breaker import CircuitBreaker
 from stock_broker_tw.risk.rate_limit import RateLimiter
 from stock_broker_tw.risk.rules import RiskEngine, RiskError
-from stock_broker_tw.state.store import MockAccountError, StateStore
+from stock_broker_tw.service.query import QueryError
+from stock_broker_tw.state.store import MockAccountError, StateStore, is_mock_account
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +53,7 @@ class BrokerServiceError(Exception):
         message: str,
         code: str = "BROKER_ERROR",
         status_code: int = 400,
-        detail: dict[str, Any] | None = None,
+        detail: Any = None,
     ) -> None:
         super().__init__(message)
         self.message = message
@@ -66,6 +69,38 @@ _TRADE_KIND_NEW = 0
 _TRADE_KIND_REPLACE_QTY = 3
 _TRADE_KIND_CANCEL = 4
 _TRADE_KIND_REPLACE_PRICE = 7
+
+
+class OfflineQuoteProvider:
+    """Deterministic quote source for mock orders when no broker is available."""
+
+    def __init__(self, bid1: float = 99.0, ask1: float = 101.0) -> None:
+        self.bid1 = self._validate_price(bid1, "bid1")
+        self.ask1 = self._validate_price(ask1, "ask1")
+        if self.bid1 > self.ask1:
+            raise ValueError("bid1 must not exceed ask1")
+
+    @staticmethod
+    def _validate_price(value: Any, name: str) -> float:
+        try:
+            price = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be numeric") from exc
+        if not math.isfinite(price) or price <= 0:
+            raise ValueError(f"{name} must be finite and positive")
+        return price
+
+    async def snapshot(self, stk_code: str, market_type: str = "TWSE") -> dict[str, Any]:
+        return {
+            "query_watch_list": [
+                {
+                    "stk_code": str(stk_code),
+                    "market_type": market_type,
+                    "buy_price": self.bid1,
+                    "sell_price": self.ask1,
+                }
+            ]
+        }
 
 
 class BrokerService:
@@ -84,6 +119,7 @@ class BrokerService:
         circuit_breaker: CircuitBreaker | None = None,
         notifier: Any = None,
         query_service: Any = None,
+        mock_quote_provider: Any = None,
     ) -> None:
         self.adapter = adapter
         self.settings = settings
@@ -94,6 +130,7 @@ class BrokerService:
         self.broadcaster = broadcaster
         self.notifier = notifier
         self.query_service = query_service
+        self.mock_quote_provider = mock_quote_provider
         self.rate_limiter = rate_limiter or RateLimiter(
             max_per_second=settings.rate_limit.trade_per_second,
             max_per_minute=settings.rate_limit.trade_per_minute,
@@ -106,12 +143,59 @@ class BrokerService:
         self._state_machine = OrderStateMachine()
         self._risk_alert_lock = threading.Lock()
         self._risk_alerts: dict[tuple[str, str], float] = {}
+        self._risk_alert_inflight: set[tuple[str, str]] = set()
         self._risk_alert_window = max(
             0.0,
             float(getattr(settings.notify, "risk_rejection_dedupe_seconds", 60.0)),
         )
 
-    # -- public API ---------------------------------------------------------
+    def _ensure_writable(self) -> None:
+        if bool(getattr(getattr(self.settings, "server", None), "read_only", False)):
+            raise BrokerServiceError(
+                "service is running in read-only mode",
+                code="READ_ONLY_MODE",
+                status_code=403,
+            )
+
+    def _parse_request(self, request: StockOrderRequest | dict[str, Any]) -> StockOrderRequest:
+        try:
+            req = StockOrderRequest.from_external_dict(request)
+        except (TypeError, ValueError) as exc:
+            raise BrokerServiceError(
+                str(exc),
+                code="INVALID_ORDER_FIELD",
+                status_code=400,
+            ) from exc
+        self._prepare_request(req)
+        return req
+
+    def _prepare_request(self, req: StockOrderRequest) -> None:
+        action = req.action.value if isinstance(req.action, OrderAction) else str(req.action).lower()
+        if action == OrderAction.NEW.value and not req.trade_date:
+            req.trade_date = datetime.now(UTC).strftime("%Y/%m/%d")
+        if not req.broker_basket_no:
+            req.broker_basket_no = self._broker_basket_no(req.client_order_id)
+
+    @staticmethod
+    def _broker_basket_no(client_order_id: str) -> str:
+        """Return a stable BasketNo without restricting local idempotency keys."""
+        if client_order_id.isascii() and client_order_id.isalnum() and 0 < len(client_order_id) <= 32:
+            return client_order_id
+        digest = hashlib.sha256(client_order_id.encode("utf-8")).hexdigest()
+        return f"B{digest[:31]}"
+
+    @staticmethod
+    def _request_matches(row: dict[str, Any], req: StockOrderRequest) -> bool:
+        existing = row.get("request") or {}
+        if not isinstance(existing, dict):
+            return False
+        existing = dict(existing)
+        current = req.to_dict()
+        for key in ("broker_basket_no",):
+            existing.pop(key, None)
+            current.pop(key, None)
+        return existing == current
+
 
     def init_mock_account(
         self,
@@ -119,6 +203,7 @@ class BrokerService:
         cash: float,
         positions: Any = None,
     ) -> dict[str, Any]:
+        self._ensure_writable()
         try:
             return self.store.init_mock_account(account, cash, positions)
         except MockAccountError as exc:
@@ -131,48 +216,82 @@ class BrokerService:
     def get_mock_account(self, account: str) -> dict[str, Any] | None:
         return self.store.get_mock_account(account)
 
+    def deactivate_mock_account(self, account: str) -> dict[str, Any]:
+        self._ensure_writable()
+        try:
+            self.store.deactivate_mock_account(account)
+        except MockAccountError as exc:
+            status_code = 404 if exc.code == "MOCK_ACCOUNT_NOT_FOUND" else 400
+            raise BrokerServiceError(
+                exc.message,
+                code=exc.code,
+                status_code=status_code,
+            ) from exc
+        return self.store.get_mock_account(account) or {
+            "account": account,
+            "active": False,
+        }
+
     async def place_stock_order(
         self,
         request: StockOrderRequest | dict[str, Any],
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        mock = bool(request.get("mock", False)) if isinstance(request, dict) else False
-        raw_account = request.get("account") if isinstance(request, dict) else None
+        self._ensure_writable()
+        req = self._parse_request(request)
+        mock = req.mock
+        raw_account = (
+            request.get("account")
+            if isinstance(request, dict)
+            else req.account
+        )
         if mock and not raw_account:
             raise BrokerServiceError(
                 "mock orders require an initialized mock account",
                 code="MOCK_ACCOUNT_REQUIRED",
                 status_code=400,
             )
-        req = StockOrderRequest.from_dict(request)
         self._ensure_account(req)
         if mock:
-            if self.store.get_mock_account(req.account) is None:
-                raise BrokerServiceError(
-                    f"mock account not found: {req.account}",
-                    code="MOCK_ACCOUNT_NOT_FOUND",
-                    status_code=404,
-                )
-        elif self.store.get_mock_account(req.account) is not None:
-            raise BrokerServiceError(
-                "mock account requires mock=true",
-                code="MOCK_ACCOUNT_REQUIRES_MOCK",
-                status_code=400,
-            )
+            self._require_active_mock_account(req.account)
         request_id = request_id or str(uuid.uuid4())
         existing = self.store.get_stock_order(req.client_order_id)
-        if existing is not None and existing.get("action") == req.action.value:
-            return existing
         if existing is not None:
-            raise BrokerServiceError(
-                "client_order_id already used for a different action",
-                code="IDEMPOTENCY_CONFLICT",
-                status_code=409,
+            same_scope = (
+                existing.get("account") == req.account
+                and existing.get("action") == req.action.value
+                and self._row_is_mock(existing) == req.mock
             )
+            if not same_scope:
+                raise BrokerServiceError(
+                    "client_order_id already used for a different account, action, or mode",
+                    code="IDEMPOTENCY_CONFLICT",
+                    status_code=409,
+                )
+            if not self._request_matches(existing, req):
+                raise BrokerServiceError(
+                    "client_order_id already used with different order parameters",
+                    code="IDEMPOTENCY_CONFLICT",
+                    status_code=409,
+                )
+            if not (
+                req.mock
+                and existing.get("status") == OrderStatus.FAILED.value
+                and bool((existing.get("data") or {}).get("retryable"))
+            ):
+                return existing
 
-        self._check_risk(req, "place", request_id)
-        self._check_write_circuit(req.client_order_id)
+        risk_request = req
+        if req.mock:
+            risk_request = StockOrderRequest.from_dict({**req.to_dict(), "price": None})
+        self._check_risk(risk_request, "place", request_id)
+        if not req.mock:
+            self._check_write_circuit(req.client_order_id)
         self._check_trade_rate(req, "place", request_id)
+        execution_id = f"{request_id}:{uuid.uuid4()}"
+        claimed_row = self._claim_pending(req, execution_id=execution_id)
+        if claimed_row is not None:
+            return claimed_row
         self.audit.record(
             "order.place",
             result="attempt",
@@ -180,9 +299,16 @@ class BrokerService:
             account=req.account,
             client_order_id=req.client_order_id,
         )
-        self._save_pending(req)
         try:
-            await self.queue.submit(req.account, lambda: self._execute_new(req, request_id, mock=mock))
+            await self.queue.submit(
+                req.account,
+                lambda: self._execute_new(
+                    req,
+                    request_id,
+                    mock=mock,
+                    execution_id=execution_id,
+                ),
+            )
         except RiskError:
             raise
         except Exception as exc:
@@ -196,7 +322,10 @@ class BrokerService:
                     error=str(exc),
                 )
                 raise
-            self._mark_failed(req.client_order_id, exc)
+            if isinstance(exc, TimeoutError):
+                await self._mark_execution_uncertain(req, exc)
+            else:
+                self._mark_failed(req.client_order_id, exc)
             self.audit.record(
                 "order.place",
                 result="error",
@@ -209,6 +338,7 @@ class BrokerService:
                 str(exc),
                 code="ORDER_SUBMIT_FAILED",
                 status_code=502,
+                detail={"execution_uncertain": True, "retryable": False} if isinstance(exc, TimeoutError) else {},
             ) from exc
         self.audit.record(
             "order.place",
@@ -224,10 +354,14 @@ class BrokerService:
         request: StockOrderRequest | dict[str, Any],
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        req = StockOrderRequest.from_dict(request)
+        self._ensure_writable()
+        req = self._parse_request(request)
         self._ensure_account(req)
         request_id = request_id or str(uuid.uuid4())
         req.action = OrderAction.CANCEL
+        if req.mock:
+            self._require_active_mock_account(req.account)
+            return self._mock_operation_result(req, "cancel")
         existing = self.store.get_stock_order(req.client_order_id)
         if existing is not None and existing.get("action") == OrderAction.CANCEL.value:
             return existing
@@ -249,7 +383,9 @@ class BrokerService:
             client_order_id=req.client_order_id,
             order_no=req.order_no,
         )
-        self._save_pending(req)
+        claimed_row = self._claim_pending(req, execution_id=f"{request_id}:{uuid.uuid4()}")
+        if claimed_row is not None:
+            return claimed_row
         try:
             await self.queue.submit(req.account, lambda: self._execute_cancel(req, request_id))
         except Exception as exc:
@@ -263,7 +399,10 @@ class BrokerService:
                     error=str(exc),
                 )
                 raise
-            self._mark_failed(req.client_order_id, exc)
+            if isinstance(exc, TimeoutError):
+                await self._mark_execution_uncertain(req, exc)
+            else:
+                self._mark_failed(req.client_order_id, exc)
             self.audit.record(
                 "order.cancel",
                 result="error",
@@ -276,6 +415,7 @@ class BrokerService:
                 str(exc),
                 code="ORDER_CANCEL_FAILED",
                 status_code=502,
+                detail={"execution_uncertain": True, "retryable": False} if isinstance(exc, TimeoutError) else {},
             ) from exc
         self.audit.record(
             "order.cancel",
@@ -293,10 +433,29 @@ class BrokerService:
         request_id: str | None = None,
     ) -> dict[str, Any]:
         self._reject_simultaneous_replace(request)
-        req = StockOrderRequest.from_dict(request)
+        self._ensure_writable()
+        req = self._parse_request(request)
+        if isinstance(request, dict) and request.get("new_quantity") is not None:
+            try:
+                new_quantity = int(request["new_quantity"])
+            except (TypeError, ValueError) as exc:
+                raise BrokerServiceError(
+                    "replace quantity must be a positive integer",
+                    code="INVALID_ORDER_FIELD",
+                    status_code=400,
+                ) from exc
+            if new_quantity <= 0:
+                raise BrokerServiceError(
+                    "replace quantity must be a positive integer",
+                    code="INVALID_ORDER_FIELD",
+                    status_code=400,
+                )
         self._ensure_account(req)
         request_id = request_id or str(uuid.uuid4())
         req.action = OrderAction.REPLACE
+        if req.mock:
+            self._require_active_mock_account(req.account)
+            return self._mock_operation_result(req, "replace")
         existing = self.store.get_stock_order(req.client_order_id)
         if existing is not None and existing.get("action") == OrderAction.REPLACE.value:
             return existing
@@ -318,7 +477,9 @@ class BrokerService:
             client_order_id=req.client_order_id,
             order_no=req.order_no,
         )
-        self._save_pending(req)
+        claimed_row = self._claim_pending(req, execution_id=f"{request_id}:{uuid.uuid4()}")
+        if claimed_row is not None:
+            return claimed_row
         try:
             await self.queue.submit(req.account, lambda: self._execute_replace(req, request_id))
         except Exception as exc:
@@ -332,7 +493,10 @@ class BrokerService:
                     error=str(exc),
                 )
                 raise
-            self._mark_failed(req.client_order_id, exc)
+            if isinstance(exc, TimeoutError):
+                await self._mark_execution_uncertain(req, exc)
+            else:
+                self._mark_failed(req.client_order_id, exc)
             self.audit.record(
                 "order.replace",
                 result="error",
@@ -345,6 +509,7 @@ class BrokerService:
                 str(exc),
                 code="ORDER_REPLACE_FAILED",
                 status_code=502,
+                detail={"execution_uncertain": True, "retryable": False} if isinstance(exc, TimeoutError) else {},
             ) from exc
         self.audit.record(
             "order.replace",
@@ -362,7 +527,8 @@ class BrokerService:
         request_id: str | None = None,
     ) -> dict[str, Any]:
         self._reject_simultaneous_replace(request)
-        req = StockOrderRequest.from_dict(request)
+        self._ensure_writable()
+        req = self._parse_request(request)
         action = req.action.value if isinstance(req.action, OrderAction) else str(req.action)
         if action == OrderAction.CANCEL.value:
             return await self.cancel_stock_order(req, request_id=request_id)
@@ -390,13 +556,130 @@ class BrokerService:
         account: str | None = None,
         status: str | None = None,
     ) -> list[dict[str, Any]]:
+        configured_account = self.settings.account.account
+        if (
+            account
+            and configured_account
+            and account != configured_account
+            and not is_mock_account(account)
+        ):
+            raise BrokerServiceError(
+                "account is not allowed for this service",
+                code="ACCOUNT_NOT_ALLOWED",
+                status_code=400,
+                detail={"account": account},
+            )
         return self.store.list_stock_orders(account=account, status=status)
 
     # -- internals ----------------------------------------------------------
 
+    @staticmethod
+    def _row_is_mock(row: dict[str, Any]) -> bool:
+        request = row.get("request") or {}
+        data = row.get("data") or {}
+        return bool(request.get("mock") or data.get("mock"))
+
     def _ensure_account(self, req: StockOrderRequest) -> None:
         if not req.account:
             req.account = self.settings.account.account
+        if req.mock and not is_mock_account(req.account):
+            raise BrokerServiceError(
+                "mock orders require a MOCK- account",
+                code="INVALID_MOCK_ACCOUNT",
+                status_code=400,
+            )
+        configured_account = self.settings.account.account
+        if not req.mock and is_mock_account(req.account):
+            raise BrokerServiceError(
+                "mock account requires mock=true",
+                code="MOCK_ACCOUNT_REQUIRES_MOCK",
+                status_code=400,
+            )
+        if not req.mock and configured_account and req.account != configured_account:
+            raise BrokerServiceError(
+                "account is not allowed for this service",
+                code="ACCOUNT_NOT_ALLOWED",
+                status_code=400,
+                detail={"account": req.account},
+            )
+        if req.mock and req.price is not None:
+            try:
+                price = float(req.price)
+            except (TypeError, ValueError) as exc:
+                raise BrokerServiceError(
+                    "mock order price must be numeric",
+                    code="INVALID_MOCK_VALUE",
+                    status_code=400,
+                ) from exc
+            if not math.isfinite(price) or price < 0:
+                raise BrokerServiceError(
+                    "mock order price must be finite and non-negative",
+                    code="INVALID_MOCK_VALUE",
+                    status_code=400,
+                )
+        if not req.mock and is_mock_account(req.account):
+            raise BrokerServiceError(
+                "mock account requires mock=true",
+                code="MOCK_ACCOUNT_REQUIRES_MOCK",
+                status_code=400,
+            )
+
+    def _require_active_mock_account(self, account: str) -> dict[str, Any]:
+        mock_account = self.store.get_mock_account(account)
+        if mock_account is None:
+            raise BrokerServiceError(
+                f"mock account not found: {account}",
+                code="MOCK_ACCOUNT_NOT_FOUND",
+                status_code=404,
+            )
+        if not mock_account.get("active", True):
+            raise BrokerServiceError(
+                f"mock account is inactive: {account}",
+                code="MOCK_ACCOUNT_INACTIVE",
+                status_code=409,
+            )
+        return mock_account
+
+    def _mock_operation_result(self, req: StockOrderRequest, action: str) -> dict[str, Any]:
+        if not req.order_no:
+            raise BrokerServiceError(
+                "mock order_no is required",
+                code="MOCK_ORDER_NOT_FOUND",
+                status_code=404,
+            )
+        target = self.store.get_stock_order_by_order_no(str(req.order_no))
+        if target is None or not self._row_is_mock(target):
+            raise BrokerServiceError(
+                "mock order not found",
+                code="MOCK_ORDER_NOT_FOUND",
+                status_code=404,
+                detail={"order_no": req.order_no},
+            )
+        if target.get("account") != req.account:
+            raise BrokerServiceError(
+                "mock order account mismatch",
+                code="MOCK_ACCOUNT_MISMATCH",
+                status_code=409,
+                detail={"order_no": req.order_no},
+            )
+        if target.get("status") in {
+            OrderStatus.FILLED.value,
+            OrderStatus.CANCELLED.value,
+            OrderStatus.REJECTED.value,
+            OrderStatus.FAILED.value,
+        }:
+            raise BrokerServiceError(
+                f"cannot {action} a final mock order",
+                code="MOCK_ORDER_FINAL",
+                status_code=409,
+                detail={"order_no": req.order_no, "status": target.get("status")},
+            )
+        raise BrokerServiceError(
+            f"mock {action} is not supported for an unresolved order",
+            code="MOCK_OPERATION_UNSUPPORTED",
+            status_code=409,
+            detail={"order_no": req.order_no, "status": target.get("status")},
+        )
 
     @staticmethod
     def _reject_simultaneous_replace(request: Any) -> None:
@@ -502,21 +785,16 @@ class BrokerService:
         now = time.monotonic()
         with self._risk_alert_lock:
             previous = self._risk_alerts.get(key)
-            if (
-                self._risk_alert_window > 0
-                and previous is not None
+            already_sent = (
+                previous is not None
                 and now - previous < self._risk_alert_window
+            )
+            if self._risk_alert_window > 0 and (
+                already_sent or key in self._risk_alert_inflight
             ):
                 metrics.notifications_suppressed_total.labels(event="risk.rejected").inc()
                 return
-            self._risk_alerts[key] = now
-            if len(self._risk_alerts) > 4096:
-                cutoff = now - self._risk_alert_window
-                self._risk_alerts = {
-                    alert_key: sent_at
-                    for alert_key, sent_at in self._risk_alerts.items()
-                    if sent_at >= cutoff
-                }
+            self._risk_alert_inflight.add(key)
 
         fields = {
             "client_order_id": req.client_order_id,
@@ -527,14 +805,57 @@ class BrokerService:
             "quantity": req.quantity,
             "action": action,
             "code": code,
+            "message": reason,
             "reason": reason,
         }
+        delivered = False
         try:
-            self.notifier.send("risk.rejected", "风控拒绝", fields)
+            delivered = bool(self.notifier.send("risk.rejected", "风控拒绝", fields))
+            if not delivered:
+                logger.warning("risk rejection notification returned false")
         except Exception as exc:
-            # Notifier implementations are expected to be best-effort, but a
-            # custom notifier must not be able to turn a rejection into success.
+            # A custom notifier must not be able to turn a rejection into success.
             logger.warning("risk rejection notification failed: %s", exc)
+        finally:
+            with self._risk_alert_lock:
+                self._risk_alert_inflight.discard(key)
+                if delivered and self._risk_alert_window > 0:
+                    self._risk_alerts[key] = time.monotonic()
+                    if len(self._risk_alerts) > 4096:
+                        cutoff = time.monotonic() - self._risk_alert_window
+                        self._risk_alerts = {
+                            alert_key: sent_at
+                            for alert_key, sent_at in self._risk_alerts.items()
+                            if sent_at >= cutoff
+                        }
+
+    def _claim_pending(
+        self,
+        req: StockOrderRequest,
+        execution_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        claimed, row = self.store.claim_stock_order(
+            req.client_order_id,
+            req.to_dict(),
+            req.account,
+            req.action.value if isinstance(req.action, OrderAction) else str(req.action),
+            mock=req.mock,
+            execution_id=execution_id,
+            lease_seconds=getattr(self.settings.mock, "claim_lease_seconds", 30.0),
+        )
+        if claimed:
+            return None
+        if (
+            row.get("account") == req.account
+            and row.get("action") == (req.action.value if isinstance(req.action, OrderAction) else str(req.action))
+            and self._row_is_mock(row) == req.mock
+        ):
+            return row
+        raise BrokerServiceError(
+            "client_order_id already used for a different action or mode",
+            code="IDEMPOTENCY_CONFLICT",
+            status_code=409,
+        )
 
     def _save_pending(self, req: StockOrderRequest) -> None:
         req.trade_date = self._date_to_str(req.trade_date)
@@ -546,7 +867,7 @@ class BrokerService:
             action=req.action.value if isinstance(req.action, OrderAction) else str(req.action),
             order_no=req.order_no,
             trade_date=req.trade_date,
-            data={"request": req.to_dict()},
+            data={"request": req.to_dict(), "mock": req.mock},
         )
 
     async def _update_status(
@@ -575,7 +896,12 @@ class BrokerService:
             # Keep store consistent even when a report/response arrives out of
             # order; mark it for manual review instead of dropping the update.
             final_status = OrderStatus.NEED_MANUAL_REVIEW.value
-        persisted_data = dict(data or {})
+        persisted_data = row.get("data") or {}
+        if not isinstance(persisted_data, dict):
+            persisted_data = {}
+        else:
+            persisted_data = dict(persisted_data)
+        persisted_data.update(data or {})
         persisted_data["transitions"] = state.transitions
         if state.need_manual_review:
             persisted_data["need_manual_review"] = True
@@ -632,6 +958,22 @@ class BrokerService:
             if inspect.isawaitable(broadcast):
                 await broadcast
 
+    async def _mark_execution_uncertain(
+        self,
+        req: StockOrderRequest,
+        exc: Exception,
+    ) -> None:
+        """Persist an after-dispatch timeout without claiming it never executed."""
+        await self._update_status(
+            req.client_order_id,
+            OrderStatus.NEED_MANUAL_REVIEW.value,
+            order_no=req.order_no,
+            trade_date=req.trade_date,
+            data={"execution_uncertain": True, "retryable": False},
+            error=str(exc),
+            reason=f"{req.action} response timed out after dispatch",
+        )
+
     def _mark_failed(self, client_order_id: str, exc: Exception) -> None:
         self.store.update_stock_order(
             client_order_id,
@@ -644,13 +986,41 @@ class BrokerService:
             req.order_no = str(req.order_no)
             local = self.store.get_stock_order_by_order_no(req.order_no)
             legacy = self.store.get_orders(order_no=req.order_no)
-            if local is None and not legacy:
+            if local is not None:
+                if self._row_is_mock(local) != req.mock:
+                    raise BrokerServiceError(
+                        "order mode does not match request mode",
+                        code="MOCK_ORDER_MODE_MISMATCH",
+                        status_code=409,
+                    )
+                if local.get("account") != req.account:
+                    raise BrokerServiceError(
+                        "order account does not match request account",
+                        code="ORDER_ACCOUNT_MISMATCH",
+                        status_code=409,
+                    )
+                req.trade_date = req.trade_date or local.get("trade_date")
+                return
+            if req.mock:
                 raise BrokerServiceError(
-                    "order_no is not found in local order mapping",
-                    code="ORDER_NOT_FOUND",
+                    "mock order was not found in stock_orders",
+                    code="MOCK_ORDER_NOT_FOUND",
                     status_code=404,
                 )
-            return
+            if legacy:
+                legacy_row = legacy[-1]
+                if legacy_row.get("account") not in {None, req.account}:
+                    raise BrokerServiceError(
+                        "order account does not match request account",
+                        code="ORDER_ACCOUNT_MISMATCH",
+                        status_code=409,
+                    )
+                return
+            raise BrokerServiceError(
+                "order_no is not found in local order mapping",
+                code="ORDER_NOT_FOUND",
+                status_code=404,
+            )
         row = self.store.get_stock_order(req.client_order_id)
         if row and row.get("order_no"):
             req.order_no = row["order_no"]
@@ -672,10 +1042,17 @@ class BrokerService:
         self,
         req: StockOrderRequest,
         request_id: str | None = None,
-        mock: bool = False,
+        mock: bool | None = None,
+        execution_id: str | None = None,
     ) -> None:
+        if mock is None:
+            mock = req.mock
         if mock:
-            await self._execute_mock(req, request_id=request_id)
+            await self._execute_mock(
+                req,
+                request_id=request_id,
+                execution_id=execution_id,
+            )
             return
         await self._update_status(req.client_order_id, OrderStatus.SUBMITTED.value, reason="sending to broker")
         response = await self._call_send(req, request_id=request_id)
@@ -745,29 +1122,85 @@ class BrokerService:
         )
         self._save_m3_order(req, order_no, trade_date)
 
+    async def _mock_snapshot(self, req: StockOrderRequest) -> Any:
+        provider = self.mock_quote_provider
+        if provider is not None:
+            method = getattr(provider, "snapshot", None)
+            if method is None:
+                method = getattr(provider, "get_snapshot", None)
+            if callable(method):
+                result = method(req.stk_code, market_type="TWSE")
+            else:
+                method = getattr(provider, "watchlist_snapshot", None)
+                if callable(method):
+                    result = method(
+                        stk_code=req.stk_code,
+                        market_type="TWSE",
+                        account=self.settings.account.account,
+                    )
+                elif callable(provider):
+                    result = provider(req.stk_code, market_type="TWSE")
+                else:
+                    raise BrokerServiceError(
+                        "mock quote provider is invalid",
+                        code="MOCK_QUOTE_PROVIDER_REQUIRED",
+                        status_code=503,
+                    )
+            return await result if inspect.isawaitable(result) else result
+        raise BrokerServiceError(
+            "mock quote provider is unavailable",
+            code="MOCK_QUOTE_PROVIDER_REQUIRED",
+            status_code=503,
+        )
+
     async def _execute_mock(
         self,
         req: StockOrderRequest,
         request_id: str | None = None,
+        execution_id: str | None = None,
     ) -> None:
-        """Fill a new order locally using the current opposing quote."""
+        """Fill a new order locally using a controlled opposing quote."""
         try:
-            if self.query_service is None:
-                raise BrokerServiceError(
-                    "mock quote service is unavailable",
-                    code="MOCK_QUOTE_UNAVAILABLE",
-                    status_code=503,
-                )
-            snapshot = await self.query_service.watchlist_snapshot(
-                stk_code=req.stk_code,
-                market_type="TWSE",
-                # Market data is read through the configured real session; the
-                # mock account must never be sent to Spark API as a real account.
-                account=self.settings.account.account,
-                request_id=request_id,
-            )
+            snapshot = await self._mock_snapshot(req)
             bid1, ask1 = self._mock_quote_prices(snapshot, req.stk_code)
-            fill_price = ask1 if self._side_value(req.side) == "B" else bid1
+            side = self._side_value(req.side)
+            fill_price = ask1 if side == "B" else bid1
+            if (
+                req.price_flag in {PriceFlag.LIMIT, "LIMIT"}
+                and req.price is not None
+                and req.price <= 0
+            ):
+                raise BrokerServiceError(
+                    "mock limit price must be positive",
+                    code="INVALID_ORDER_FIELD",
+                    status_code=400,
+                )
+            if (
+                req.price_flag in {PriceFlag.LIMIT, "LIMIT"}
+                and req.price is not None
+                and (
+                    (side == "B" and fill_price > req.price)
+                    or (side == "S" and fill_price < req.price)
+                )
+            ):
+                raise BrokerServiceError(
+                    "mock opposing quote is outside the limit price",
+                    code="MOCK_LIMIT_NOT_MARKETABLE",
+                    status_code=409,
+                    detail={"fill_price": fill_price, "limit_price": req.price},
+                )
+            try:
+                self.risk.check({**req.to_dict(), "price": fill_price})
+            except RiskError as exc:
+                await self._update_status(
+                    req.client_order_id,
+                    OrderStatus.REJECTED.value,
+                    data={"mock": True, "fill_price": fill_price},
+                    error=exc.message,
+                    reason="mock fill failed risk check",
+                )
+                raise
+
             now = datetime.now(UTC)
             order_no = f"MOCK-{uuid.uuid4()}"
             trade_date = now.strftime("%Y/%m/%d")
@@ -781,14 +1214,25 @@ class BrokerService:
                 "avg_price": fill_price,
                 "timestamp": now.isoformat(),
             }
-            self.store.apply_mock_fill(
+            result = self.store.settle_mock_fill(
+                client_order_id=req.client_order_id,
                 account=req.account,
-                side=self._side_value(req.side),
+                side=side,
                 stk_code=req.stk_code,
                 quantity=req.quantity,
                 price=fill_price,
+                order_no=order_no,
+                trade_date=trade_date,
+                data=mock_data,
+                execution_id=execution_id,
             )
         except MockAccountError as exc:
+            if exc.code == "MOCK_EXECUTION_CLAIM_LOST":
+                raise BrokerServiceError(
+                    exc.message,
+                    code=exc.code,
+                    status_code=409,
+                ) from exc
             await self._update_status(
                 req.client_order_id,
                 OrderStatus.REJECTED.value,
@@ -797,19 +1241,45 @@ class BrokerService:
                 reason="mock account rejected fill",
             )
             self._notify_risk_rejection(req, "place", exc.code, exc.message)
+            raise BrokerServiceError(exc.message, code=exc.code, status_code=409) from exc
+        except QueryError as exc:
+            await self._update_status(
+                req.client_order_id,
+                OrderStatus.FAILED.value,
+                data={
+                    "mock": True,
+                    "retryable": True,
+                    "query_error": {
+                        "code": exc.code,
+                        "status_code": exc.status_code,
+                        "detail": exc.detail,
+                    },
+                },
+                error=exc.message,
+                reason="mock quote provider query failed",
+            )
             raise BrokerServiceError(
                 exc.message,
                 code=exc.code,
-                status_code=409,
+                status_code=exc.status_code,
+                detail=exc.detail,
             ) from exc
+        except RiskError:
+            raise
         except BrokerServiceError as exc:
-            await self._update_status(
-                req.client_order_id,
-                OrderStatus.REJECTED.value,
-                data={"mock": True},
-                error=exc.message,
-                reason="mock quote unavailable",
-            )
+            row = self.store.get_stock_order(req.client_order_id)
+            if row is not None and row.get("status") == OrderStatus.PENDING.value:
+                retryable = exc.code in {
+                    "MOCK_QUOTE_UNAVAILABLE",
+                    "MOCK_QUOTE_PROVIDER_REQUIRED",
+                }
+                await self._update_status(
+                    req.client_order_id,
+                    OrderStatus.FAILED.value if retryable else OrderStatus.REJECTED.value,
+                    data={"mock": True, "retryable": retryable},
+                    error=exc.message,
+                    reason="mock quote or limit check failed",
+                )
             raise
         except Exception as exc:
             await self._update_status(
@@ -825,23 +1295,22 @@ class BrokerService:
                 status_code=502,
             ) from exc
 
-        await self._update_status(
-            req.client_order_id,
-            OrderStatus.ACCEPTED.value,
-            order_no=order_no,
-            trade_date=trade_date,
-            data=mock_data,
-            reason="mock order accepted",
+        if self.broadcaster is not None and hasattr(self.broadcaster, "broadcast_order_update"):
+            for status in (OrderStatus.ACCEPTED.value, OrderStatus.FILLED.value):
+                state = dict(result)
+                state["status"] = status
+                broadcast = self.broadcaster.broadcast_order_update(state)
+                if inspect.isawaitable(broadcast):
+                    await broadcast
+        self._notify(
+            "order.status",
+            "订单状态变化",
+            {
+                "client_order_id": req.client_order_id,
+                "status": OrderStatus.FILLED.value,
+                "order_no": result.get("order_no"),
+            },
         )
-        await self._update_status(
-            req.client_order_id,
-            OrderStatus.FILLED.value,
-            order_no=order_no,
-            trade_date=trade_date,
-            data=mock_data,
-            reason="mock order filled",
-        )
-        self._save_m3_order(req, order_no, trade_date)
 
     @staticmethod
     def _mock_quote_prices(snapshot: Any, stk_code: str) -> tuple[float, float]:
@@ -913,6 +1382,12 @@ class BrokerService:
         if not math.isfinite(bid1) or not math.isfinite(ask1) or bid1 <= 0 or ask1 <= 0:
             raise BrokerServiceError(
                 f"mock quote has unavailable prices for {stk_code}",
+                code="MOCK_QUOTE_UNAVAILABLE",
+                status_code=502,
+            )
+        if bid1 > ask1:
+            raise BrokerServiceError(
+                f"mock quote has crossed prices for {stk_code}",
                 code="MOCK_QUOTE_UNAVAILABLE",
                 status_code=502,
             )
@@ -1033,86 +1508,57 @@ class BrokerService:
             reason="broker accepted replace request",
         )
 
+    @staticmethod
+    def _supports_keyword(method: Any, name: str) -> bool:
+        try:
+            parameters = inspect.signature(method).parameters.values()
+        except (TypeError, ValueError):
+            return True
+        return any(
+            parameter.name == name or parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+
+    async def _invoke_adapter(
+        self,
+        method: Any,
+        *args: Any,
+        timeout: float,
+        request_id: str | None,
+    ) -> Any:
+        kwargs: dict[str, Any] = {"timeout": timeout}
+        if request_id is not None and self._supports_keyword(method, "request_id"):
+            kwargs["request_id"] = request_id
+        if asyncio.iscoroutinefunction(method):
+            result = await method(*args, **kwargs)
+        else:
+            result = await asyncio.to_thread(method, *args, **kwargs)
+        return await result if inspect.isawaitable(result) else result
+
     async def _call_send(self, req: StockOrderRequest, request_id: str | None = None) -> Any:
         order = self._build_order(req, request_id=request_id)
         timeout = getattr(getattr(self.settings, "risk", None), "order_timeout", 10.0)
         try:
             send = getattr(self.adapter, "send_stock_order", None)
             if callable(send):
-                if asyncio.iscoroutinefunction(send):
-                    try:
-                        if request_id is not None:
-                            result = await send(
-                                req.account, order, timeout=timeout, request_id=request_id
-                            )
-                        else:
-                            result = await send(req.account, order, timeout=timeout)
-                    except TypeError:
-                        result = await send(req.account, order, timeout=timeout)
-                else:
-                    try:
-                        if request_id is not None:
-                            result = await asyncio.to_thread(
-                                send,
-                                req.account,
-                                order,
-                                timeout=timeout,
-                                request_id=request_id,
-                            )
-                        else:
-                            result = await asyncio.to_thread(
-                                send, req.account, order, timeout=timeout
-                            )
-                    except TypeError:
-                        result = await asyncio.to_thread(send, req.account, order, timeout=timeout)
-                if inspect.isawaitable(result):
-                    result = await result
+                result = await self._invoke_adapter(
+                    send,
+                    req.account,
+                    order,
+                    timeout=timeout,
+                    request_id=request_id,
+                )
             else:
                 query = getattr(self.adapter, "query", None)
                 if callable(query):
-                    if asyncio.iscoroutinefunction(query):
-                        try:
-                            if request_id is not None:
-                                result = await query(
-                                    "SendStockOrder",
-                                    req.account,
-                                    [order],
-                                    timeout=timeout,
-                                    request_id=request_id,
-                                )
-                            else:
-                                result = await query(
-                                    "SendStockOrder", req.account, [order], timeout=timeout
-                                )
-                        except TypeError:
-                            result = await query(
-                                "SendStockOrder", req.account, [order], timeout=timeout
-                            )
-                    else:
-                        try:
-                            if request_id is not None:
-                                result = await asyncio.to_thread(
-                                    query,
-                                    "SendStockOrder",
-                                    req.account,
-                                    [order],
-                                    timeout=timeout,
-                                    request_id=request_id,
-                                )
-                            else:
-                                result = await asyncio.to_thread(
-                                    query,
-                                    "SendStockOrder",
-                                    req.account,
-                                    [order],
-                                    timeout=timeout,
-                                )
-                        except TypeError:
-                            result = await asyncio.to_thread(
-                                query, "SendStockOrder", req.account, [order], timeout=timeout
-                            )
-                    if inspect.isawaitable(result):
-                        result = await result
+                    result = await self._invoke_adapter(
+                        query,
+                        "SendStockOrder",
+                        req.account,
+                        [order],
+                        timeout=timeout,
+                        request_id=request_id,
+                    )
                 else:
                     raise BrokerServiceError(
                         "adapter does not support SendStockOrder",
@@ -1140,25 +1586,20 @@ class BrokerService:
         request_id: str | None = None,
     ) -> dict[str, Any]:
         return {
-            # Use the caller's request_id as the Yuanta Identify correlation id
-            # when available and no explicit custom Identify was supplied; it is
-            # echoed in SendStockOrder responses.
-            "identify": (
-                request_id
-                if request_id is not None and req.identify == 1
-                else req.identify
-            ),
+            # Identify is a .NET integer field.  request_id remains the
+            # application-level correlation id and is handled by the adapter.
+            "identify": req.identify,
             "account": req.account or self.settings.account.account,
             "order_no": req.order_no or "",
             "trade_date": self._date_to_str(req.trade_date) or "",
-            "ap_code": req.ap_code,
+            "ap_code": req.ap_code.to_sdk_value() if isinstance(req.ap_code, ApCode) else int(req.ap_code),
             "trade_kind": self._trade_kind(req),
             "order_type": req.order_type,
             "stk_code": req.stk_code,
             "buy_sell": self._side_value(req.side),
             "price_flag": self._price_flag_value(req.price_flag),
             "price": req.price or 0.0,
-            "basket_no": req.client_order_id,
+            "basket_no": req.broker_basket_no or self._broker_basket_no(req.client_order_id),
             "order_qty": req.quantity or 0,
             "time_in_force": self._tif_value(req.time_in_force),
         }
@@ -1275,7 +1716,7 @@ class BrokerService:
                     "company_no": req.stk_code,
                     "status": "20",
                     "client_order_id": req.client_order_id,
-                    "basket_no": req.client_order_id,
+                    "basket_no": req.broker_basket_no or self._broker_basket_no(req.client_order_id),
                     "bs": self._side_value(req.side),
                     "price": req.price,
                     "order_qty": req.quantity,
@@ -1284,4 +1725,4 @@ class BrokerService:
         )
 
 
-__all__ = ["BrokerService", "BrokerServiceError"]
+__all__ = ["BrokerService", "BrokerServiceError", "OfflineQuoteProvider"]

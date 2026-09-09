@@ -82,10 +82,10 @@ class FakeAdapter:
         return {}
 
 
-def make_client(tmp_path: Path, adapter: FakeAdapter | None = None, risk: RiskConfig | None = None):
+def make_client(tmp_path: Path, adapter: FakeAdapter | None = None, risk: RiskConfig | None = None, read_only: bool = False):
     adapter = adapter or FakeAdapter()
     settings = Settings(
-        server=ServerConfig(api_token="test-token"),
+        server=ServerConfig(api_token="test-token", read_only=read_only),
         account=AccountConfig(account="S98875005091", password="1234"),
         state=StateConfig(db_path=str(tmp_path / "state.db")),
         risk=risk or RiskConfig(),
@@ -274,3 +274,95 @@ def test_circuit_open_blocks_write_with_503(tmp_path: Path) -> None:
             headers=auth(),
         )
         assert ok_res.status_code == 200
+
+
+def test_read_only_mode_blocks_all_mutations_but_allows_reads(tmp_path: Path) -> None:
+    client, adapter = make_client(tmp_path, read_only=True)
+    with client:
+        headers = auth()
+        order = client.post(
+            "/api/v1/orders/stock",
+            json={"client_order_id": "READONLY001", "stk_code": "2330", "quantity": 1},
+            headers=headers,
+        )
+        subscribe = client.post(
+            "/api/v1/quotes/subscribe",
+            json={"type": "five_tick", "symbols": ["2330"]},
+            headers=headers,
+        )
+        panic = client.post("/api/v1/control/panic", headers=headers)
+        health = client.get("/health")
+
+    assert order.status_code == 403
+    assert subscribe.status_code == 403
+    assert panic.status_code == 403
+    assert health.status_code == 200
+    assert adapter.calls == []
+
+
+def test_order_api_rejects_non_default_account(tmp_path: Path) -> None:
+    client, adapter = make_client(tmp_path)
+    with client:
+        response = client.post(
+            "/api/v1/orders/stock",
+            json={
+                "client_order_id": "OTHER001",
+                "account": "S00000000000",
+                "stk_code": "2330",
+                "side": "B",
+                "price": 500.0,
+                "quantity": 1,
+            },
+            headers=auth(),
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "ACCOUNT_NOT_ALLOWED"
+    assert adapter.calls == []
+
+
+def test_recovery_api_rejects_invalid_status(tmp_path: Path) -> None:
+    client, _adapter = make_client(tmp_path)
+    with client:
+        client.app.state.store.save_stock_order(
+            client_order_id="RECOVERY001",
+            request={"client_order_id": "RECOVERY001"},
+            status="NEED_MANUAL_REVIEW",
+            account="S98875005091",
+            action="new",
+        )
+        response = client.post(
+            "/api/v1/recovery/RECOVERY001/resolve",
+            json={"status": "BOGUS"},
+            headers=auth(),
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "INVALID_RECOVERY_STATUS"
+    assert client.app.state.store.get_stock_order("RECOVERY001")["status"] == "NEED_MANUAL_REVIEW"
+
+
+def test_query_api_rejects_non_default_account(tmp_path: Path) -> None:
+    client, adapter = make_client(tmp_path)
+    with client:
+        response = client.get(
+            "/api/v1/positions?account=S00000000000",
+            headers=auth(),
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "ACCOUNT_NOT_ALLOWED"
+    assert adapter.query_calls == []
+
+
+def test_order_list_api_rejects_non_default_account(tmp_path: Path) -> None:
+    client, adapter = make_client(tmp_path)
+    with client:
+        response = client.get(
+            "/api/v1/orders?account=S00000000000",
+            headers=auth(),
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "ACCOUNT_NOT_ALLOWED"
+    assert adapter.calls == []

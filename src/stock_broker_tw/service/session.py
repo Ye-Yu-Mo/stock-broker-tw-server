@@ -59,6 +59,13 @@ class SessionService:
     ) -> dict[str, Any]:
         request_id = request_id or str(uuid.uuid4())
         account = credentials.account or self.settings.account.account
+        configured_account = self.settings.account.account
+        if configured_account and account != configured_account:
+            raise SessionError(
+                "account is not allowed for this service",
+                code="ACCOUNT_NOT_ALLOWED",
+                status_code=400,
+            )
         password = credentials.password or self.settings.account.password
         pfx_path = credentials.pfx_path or self.settings.account.pfx_path
         pfx_pass = credentials.pfx_pass or self.settings.account.pfx_pass
@@ -90,6 +97,18 @@ class SessionService:
                 "pfx" if pfx_path else "password",
             )
             self.adapter.open()
+            wait_until_ready = getattr(self.adapter, "wait_until_ready", None)
+            if callable(wait_until_ready):
+                ready = await asyncio.to_thread(
+                    wait_until_ready,
+                    timeout=self.settings.yuanta.login_timeout,
+                )
+                if not ready:
+                    raise SessionError(
+                        "timed out waiting for trading host connection",
+                        code="ADAPTER_NOT_READY",
+                        status_code=504,
+                    )
             self._clear_login_result(self.adapter)
             accepted = self.adapter.login(
                 account,
@@ -104,6 +123,16 @@ class SessionService:
                 getattr(self.adapter, "opened", None),
                 getattr(self.adapter, "logged_in", None),
             )
+        except SessionError as exc:
+            metrics.login_attempts_total.labels(result="timeout").inc()
+            self.audit.record(
+                "session.login",
+                result="timeout",
+                request_id=request_id,
+                account=account,
+                error=exc.message,
+            )
+            raise
         except YuantaAdapterError as exc:
             metrics.login_attempts_total.labels(result="error").inc()
             self.audit.record(
@@ -120,11 +149,13 @@ class SessionService:
             ) from exc
 
         if not accepted:
+            system_event = getattr(self.adapter, "last_system_event", None)
             logger.warning(
-                "session login rejected by adapter: request_id=%s accepted=False opened=%s logged_in=%s",
+                "session login rejected by adapter: request_id=%s accepted=False opened=%s logged_in=%s system_event=%s",
                 request_id,
                 getattr(self.adapter, "opened", None),
                 getattr(self.adapter, "logged_in", None),
+                system_event,
             )
             metrics.login_attempts_total.labels(result="error").inc()
             self.audit.record(
@@ -133,6 +164,7 @@ class SessionService:
                 request_id=request_id,
                 account=account,
                 error="login request rejected by adapter",
+                system_event=system_event,
             )
             raise SessionError("login request was rejected", code="LOGIN_REJECTED", status_code=502)
 

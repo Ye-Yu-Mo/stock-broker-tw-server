@@ -67,11 +67,32 @@ class QuoteService:
 
     # -- public API ---------------------------------------------------------
 
+    def _ensure_writable(self) -> None:
+        if bool(getattr(getattr(self.settings, "server", None), "read_only", False)):
+            raise QuoteServiceError(
+                "service is running in read-only mode",
+                code="READ_ONLY_MODE",
+                status_code=403,
+            )
+
+    def _account(self, account: str | None) -> str:
+        resolved = account or self.settings.account.account
+        configured = self.settings.account.account
+        if configured and resolved != configured:
+            raise QuoteServiceError(
+                "account is not allowed for this service",
+                code="ACCOUNT_NOT_ALLOWED",
+                status_code=400,
+                detail={"account": resolved},
+            )
+        return resolved
+
     async def subscribe(
         self,
         request: SubscribeRequest | dict[str, Any],
         request_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        self._ensure_writable()
         try:
             req = SubscribeRequest.from_dict(request)
         except ValueError as exc:
@@ -80,7 +101,7 @@ class QuoteService:
                 code="INVALID_QUOTE_TYPE",
                 status_code=400,
             ) from exc
-        account = req.account or self.settings.account.account
+        account = self._account(req.account)
         if not req.symbols:
             raise QuoteServiceError(
                 "symbols must not be empty",
@@ -181,6 +202,7 @@ class QuoteService:
         request: SubscribeRequest | dict[str, Any],
         request_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        self._ensure_writable()
         try:
             req = SubscribeRequest.from_dict(request)
         except ValueError as exc:
@@ -189,7 +211,7 @@ class QuoteService:
                 code="INVALID_QUOTE_TYPE",
                 status_code=400,
             ) from exc
-        account = req.account or self.settings.account.account
+        account = self._account(req.account)
 
         existing = self.store.list_quote_subscriptions(account=account)
         index_flag = self._index_flag(req)
@@ -265,7 +287,7 @@ class QuoteService:
         account: str | None = None,
         quote_type: str | None = None,
     ) -> list[dict[str, Any]]:
-        acct = account or self.settings.account.account
+        acct = self._account(account)
         return self._serialize_rows(
             self.store.list_quote_subscriptions(account=acct, quote_type=quote_type)
         )

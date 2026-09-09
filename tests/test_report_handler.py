@@ -140,3 +140,143 @@ def test_unknown_report_does_not_rollback_final_order(tmp_path: Path) -> None:
     }
     run(handler.handle_event(YuantaEvent(2, 0, "RR_RealReport", None, report)))
     assert store.get_stock_order("C001")["status"] == "FILLED"
+
+
+def test_real_report_does_not_update_pending_mock_order(tmp_path: Path) -> None:
+    store, broadcaster, handler = make_env(tmp_path)
+    store.init_mock_account("MOCK-REPORT", cash=10_000.0, positions=[])
+    store.claim_stock_order(
+        "MOCK-REPORT-001",
+        {
+            "client_order_id": "MOCK-REPORT-001",
+            "action": "new",
+            "account": "MOCK-REPORT",
+            "stk_code": "2330",
+            "quantity": 10,
+            "mock": True,
+        },
+        account="MOCK-REPORT",
+        action="new",
+        mock=True,
+    )
+    report = {
+        "order_no": "H00001",
+        "basket_no": "MOCK-REPORT-001",
+        "order_status": 8,
+        "ok_qty": 10,
+        "order_qty": 10,
+        "account": "MOCK-REPORT",
+    }
+
+    run(handler.handle_event(YuantaEvent(2, 0, "RR_RealReport", None, report)))
+
+    row = store.get_stock_order("MOCK-REPORT-001")
+    assert row["status"] == "PENDING"
+    assert store.get_mock_account("MOCK-REPORT")["cash"] == 10_000.0
+    assert store.get_trades() == []
+    assert broadcaster.messages[-1]["type"] == "real_report"
+
+
+def test_report_matches_broker_basket_mapping_for_long_client_id(tmp_path: Path) -> None:
+    store, _broadcaster, handler = make_env(tmp_path)
+    client_order_id = "client-order-with-more-than-thirty-two-characters-001"
+    broker_basket_no = "B" + "a" * 31
+    store.save_stock_order(
+        client_order_id=client_order_id,
+        request={
+            "client_order_id": client_order_id,
+            "broker_basket_no": broker_basket_no,
+            "action": "new",
+            "account": "S98875005091",
+            "stk_code": "2330",
+            "side": "B",
+            "price": 500.0,
+            "quantity": 1,
+        },
+        status="ACCEPTED",
+        account="S98875005091",
+        order_no=None,
+        trade_date="2026/08/28",
+    )
+
+    run(
+        handler.handle_event(
+            YuantaEvent(
+                2,
+                0,
+                "RR_RealReport",
+                None,
+                {
+                    "order_no": "H00002",
+                    "basket_no": broker_basket_no,
+                    "order_status": 8,
+                    "ok_qty": 1,
+                    "order_qty": 1,
+                },
+            )
+        )
+    )
+
+    assert store.get_stock_order(client_order_id)["status"] == "FILLED"
+
+
+def test_report_status_zero_means_accepted(tmp_path: Path) -> None:
+    store, _broadcaster, handler = make_env(tmp_path)
+    _save_order(store, "ZERO001")
+
+    run(
+        handler.handle_event(
+            YuantaEvent(
+                2,
+                0,
+                "RR_RealReport",
+                None,
+                {"order_no": "H00001", "basket_no": "ZERO001", "order_status": 0, "last_order_status": 0},
+            )
+        )
+    )
+
+    assert store.get_stock_order("ZERO001")["status"] == "ACCEPTED"
+
+
+def test_failed_replace_does_not_reject_original_order(tmp_path: Path) -> None:
+    store, _broadcaster, handler = make_env(tmp_path)
+    _save_order(store, "ORIGINAL001")
+    store.save_stock_order(
+        client_order_id="REPLACE001",
+        request={
+            "client_order_id": "REPLACE001",
+            "action": "replace",
+            "account": "S98875005091",
+            "stk_code": "2330",
+            "side": "B",
+            "price": 510.0,
+            "quantity": 1000,
+        },
+        status="SUBMITTED",
+        account="S98875005091",
+        action="replace",
+        order_no="H00001",
+        trade_date="2026/08/28",
+    )
+
+    run(
+        handler.handle_event(
+            YuantaEvent(
+                2,
+                0,
+                "RR_RealReport",
+                None,
+                {
+                    "client_order_id": "REPLACE001",
+                    "order_no": "H00001",
+                    "basket_no": "REPLACE001",
+                    "order_status": 21,
+                    "order_qty": 1000,
+                },
+            )
+        )
+    )
+
+    assert store.get_stock_order("REPLACE001")["status"] == "REJECTED"
+    assert store.get_stock_order("ORIGINAL001")["status"] == "ACCEPTED"
