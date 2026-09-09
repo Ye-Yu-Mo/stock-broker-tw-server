@@ -25,6 +25,7 @@
 
 - 会话管理：登录 / 登出 / 状态
 - 本土股票交易：新单 / 撤单 / 改价 / 改量
+- 语义化交易参数：`ap_code` 支持 `REGULAR` / `ODD_LOT` / `INTRADAY_ODD_LOT` / `AFTER_HOURS`，兼容 `0/2/4/7`
 - 订单状态机：`PENDING → SUBMITTED → ACCEPTED → FILLED/CANCELLED/REJECTED`
 - 幂等控制：`client_order_id` 防止重复下单
 - 行情订阅：watchlist / 五档 / 分时 / 个股资讯
@@ -105,10 +106,7 @@ curl http://127.0.0.1:8000/health
 | [部署文档](docs/deploy.md) | 安装、配置、启动、升级 |
 | [UAT 联调清单](docs/uat-checklist.md) | 获取 UAT 权限后的验证清单 |
 | [元大 API 整理](docs/api.md) | 元大 SPARK API 功能整理 |
-| [设计文档](DESIGN.md) | 系统设计 |
-| [开发计划](PLAN.md) | 里程碑计划 |
 | [更新日志](CHANGELOG.md) | 版本变更记录 |
-| [TODO-M1](TODO-M1.md) ~ [TODO-M6](TODO-M6.md) | 各里程碑任务清单 |
 
 ## 测试
 
