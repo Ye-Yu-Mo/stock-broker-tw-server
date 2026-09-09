@@ -56,6 +56,12 @@ _MERGE_FILL_STATUSES = frozenset({20})
 _MERGE_SUBMITTED_STATUSES = frozenset({0})
 
 
+def _is_mock_order(order: dict[str, Any]) -> bool:
+    request = order.get("request") or {}
+    data = order.get("data") or {}
+    return bool(request.get("mock") or data.get("mock"))
+
+
 class ReportHandler:
     """Translate raw real-report events into persisted order updates."""
 
@@ -108,7 +114,30 @@ class ReportHandler:
             row = self.store.get_stock_order(str(client_order_id))
         if row is None and order_no:
             row = self.store.get_stock_order_by_order_no(str(order_no))
+        if row is None and report.get("basket_no"):
+            row = self.store.get_stock_order_by_basket_no(str(report["basket_no"]))
         if row is None:
+            payload = {
+                "type": report_type,
+                "data": {**report, "status": None, "client_order_id": client_order_id},
+            }
+            await self._broadcast(payload)
+            return None
+        if _is_mock_order(row):
+            # Real broker reports must never settle or mutate a Mock order.
+            payload = {
+                "type": report_type,
+                "data": {**report, "status": None, "client_order_id": client_order_id},
+            }
+            await self._broadcast(payload)
+            return None
+        report_account = report.get("account") or report.get("Account")
+        if (
+            report_account is not None
+            and row.get("account") is not None
+            and str(report_account) != str(row["account"])
+        ):
+            # A broker report from another account must not update this row.
             payload = {
                 "type": report_type,
                 "data": {**report, "status": None, "client_order_id": client_order_id},
@@ -163,7 +192,10 @@ class ReportHandler:
         # If several local client_order_id rows map to the same broker OrderNo
         # (e.g. an original order plus a cancel/replace operation), keep them all
         # in sync so any client_order_id lookup sees the latest report status.
-        if order_no or row.get("order_no"):
+        if (
+            (order_no or row.get("order_no"))
+            and (not client_order_id or row.get("action") in {None, "new"})
+        ):
             mapped_order_no = order_no or row.get("order_no")
             for other in self.store.list_stock_orders():
                 if (
@@ -241,8 +273,10 @@ class ReportHandler:
         report_type: str = "real_report",
     ) -> OrderStatus | None:
         try:
-            order_status = int(report.get("order_status") or -1)
-            last_status = int(report.get("last_order_status") or -1)
+            order_status_raw = report.get("order_status")
+            last_status_raw = report.get("last_order_status")
+            order_status = int(order_status_raw) if order_status_raw is not None else -1
+            last_status = int(last_status_raw) if last_status_raw is not None else -1
         except (TypeError, ValueError):
             return None
         ok_qty = int(report.get("ok_qty") or 0)

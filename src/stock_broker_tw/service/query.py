@@ -381,7 +381,16 @@ class QueryService:
     # -- helpers -----------------------------------------------------------
 
     def _account(self, account: str | None = None) -> str:
-        return account or self.settings.account.account
+        resolved = account or self.settings.account.account
+        configured = self.settings.account.account
+        if configured and resolved != configured:
+            raise QueryError(
+                "account is not allowed for this service",
+                code="ACCOUNT_NOT_ALLOWED",
+                status_code=400,
+                detail={"account": resolved},
+            )
+        return resolved
 
     async def _query(self, function_name: str, request_id: str | None = None, **params: Any) -> Any:
         if not self.rate_limiter.acquire(function_name, key=params.get("Account")):

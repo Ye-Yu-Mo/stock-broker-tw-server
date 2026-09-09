@@ -6,6 +6,8 @@ from stock_broker_tw.yuanta.loader import (
     _detect_dotnet_root,
     get_default_spark_api_dir,
     get_environment_mode,
+    get_language_type,
+    get_log_type,
 )
 
 
@@ -22,6 +24,32 @@ def test_environment_mode_returns_string_when_assembly_not_loaded() -> None:
     # loader intentionally returns the original string so callers can fall back.
     mode = get_environment_mode("UAT")
     assert mode == "UAT"
+
+
+def test_language_type_falls_back_to_documented_numeric_values(monkeypatch) -> None:
+    monkeypatch.delitem(__import__("sys").modules, "YuantaOneAPI", raising=False)
+    assert get_language_type("Normal") == 0
+    assert get_language_type("UTF8") == 1
+    assert get_language_type("SC") == 2
+
+
+def test_log_type_aliases_fall_back_to_documented_numeric_values(monkeypatch) -> None:
+    monkeypatch.delitem(__import__("sys").modules, "YuantaOneAPI", raising=False)
+    assert get_log_type("DEBUG") == 4
+    assert get_log_type("ERROR") == 2
+    assert get_log_type("COMMON_WITH_QUOTE") == 3
+
+
+def test_language_type_uses_uppercase_sdk_member(monkeypatch) -> None:
+    import types
+
+    yuanta_module = types.ModuleType("YuantaOneAPI")
+    yuanta_module.enumLangType = types.SimpleNamespace(
+        NORMAL="normal", UTF8="utf8", SC="sc"
+    )
+    monkeypatch.setitem(__import__("sys").modules, "YuantaOneAPI", yuanta_module)
+
+    assert get_language_type("Normal") == "normal"
 
 
 def test_detect_dotnet_root_uses_explicit_env(monkeypatch) -> None:

@@ -42,6 +42,21 @@ class Metrics:
             "Total requests rejected by risk/security checks",
             ["reason"],
         )
+        self.notifications_sent_total = Counter(
+            "notifications_sent_total",
+            "Total notifications sent successfully",
+            ["event"],
+        )
+        self.notifications_failed_total = Counter(
+            "notifications_failed_total",
+            "Total notifications that failed to send",
+            ["event"],
+        )
+        self.notifications_suppressed_total = Counter(
+            "notifications_suppressed_total",
+            "Total duplicate notifications suppressed",
+            ["event"],
+        )
         self.rate_limited_total = Counter(
             "rate_limited_total",
             "Total requests rejected by the unified rate limiter",

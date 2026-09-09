@@ -8,17 +8,18 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from prometheus_client import CONTENT_TYPE_LATEST
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, FiniteFloat
 
 from stock_broker_tw.audit import AuditLogger
 from stock_broker_tw.broker.service import BrokerService, BrokerServiceError
 from stock_broker_tw.config import Settings
-from stock_broker_tw.engine.state import OrderAction
+from stock_broker_tw.engine.state import ApCode, OrderAction
 from stock_broker_tw.metrics import metrics, render_metrics
 from stock_broker_tw.risk.rules import RiskError
 from stock_broker_tw.service.query import QueryError, QueryService
 from stock_broker_tw.service.quote import QuoteService, QuoteServiceError
 from stock_broker_tw.service.session import LoginCredentials, SessionError, SessionService
+from stock_broker_tw.state.store import MockAccountError
 from stock_broker_tw.yuanta.adapter import YuantaAdapter
 
 router = APIRouter()
@@ -33,14 +34,37 @@ class StockOrderPayload(BaseModel):
     account: str | None = None
     stk_code: str = ""
     side: str = "B"
-    price: float | None = None
+    price: FiniteFloat | None = None
     quantity: int = 0
+    ap_code: ApCode | int | str = ApCode.REGULAR
     time_in_force: str = "ROD"
     price_flag: str = "LIMIT"
     order_no: str | None = None
     trade_date: str | None = None
-    new_price: float | None = None
+    new_price: FiniteFloat | None = None
     new_quantity: int | None = None
+    mock: bool = False
+
+
+class MockPositionPayload(BaseModel):
+    """Initial position held by a simulated account."""
+
+    stk_code: str = Field(..., min_length=1)
+    quantity: int = Field(0, ge=0)
+    avg_price: FiniteFloat | None = Field(None, ge=0)
+
+
+class MockAccountInitPayload(BaseModel):
+    """Body for initializing a server-maintained simulated account."""
+
+    account: str = Field(
+        ...,
+        min_length=6,
+        max_length=64,
+        pattern=r"^MOCK-[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
+    cash: FiniteFloat = Field(..., ge=0)
+    positions: list[MockPositionPayload] = Field(default_factory=list)
 
 
 class QuoteSubscribePayload(BaseModel):
@@ -140,6 +164,15 @@ async def require_token(
         )
 
 
+async def require_writable(request: Request) -> None:
+    settings = get_settings(request)
+    if bool(getattr(settings.server, "read_only", False)):
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "READ_ONLY_MODE", "message": "service is running in read-only mode"},
+        )
+
+
 def ok(data: Any = None) -> dict[str, Any]:
     return {"code": 0, "message": "ok", "data": data}
 
@@ -162,18 +195,19 @@ async def health(request: Request) -> dict[str, Any]:
     circuit_breaker = getattr(request.app.state, "circuit_breaker", None)
     last_recovery = getattr(request.app.state, "last_recovery", None)
     return {
-        "status": "ok" if adapter_ready else "degraded",
+        "status": "ok" if adapter_ready and login_status else "degraded",
         "adapter_ready": adapter_ready,
         "login_status": login_status,
         "event_queue_size": event_queue_size,
         "audit_enabled": settings.audit.enabled,
         "audit_file": settings.audit.file,
-        "version": "0.1.0",
+        "version": "0.1.3",
         "environment": settings.yuanta.environment,
         "panic": bool(getattr(risk_engine, "panic", False)) if risk_engine is not None else False,
         "circuit_breaker_open": bool(getattr(circuit_breaker, "is_open", False)) if circuit_breaker is not None else False,
         "circuit_breaker": circuit_breaker.to_dict() if circuit_breaker is not None else None,
         "last_failure": getattr(circuit_breaker, "last_error", None) if circuit_breaker is not None else None,
+        "last_system_event": getattr(adapter, "last_system_event", None),
         "last_recovery": last_recovery,
     }
 
@@ -384,7 +418,7 @@ async def reports_order_trade(
         _raise_query_error(exc)
 
 
-@router.post("/api/v1/quotes/subscribe", dependencies=[Depends(require_token)])
+@router.post("/api/v1/quotes/subscribe", dependencies=[Depends(require_token), Depends(require_writable)])
 async def quotes_subscribe(request: Request, payload: QuoteSubscribePayload) -> dict[str, Any]:
     service = get_quote_service(request)
     try:
@@ -397,7 +431,7 @@ async def quotes_subscribe(request: Request, payload: QuoteSubscribePayload) -> 
     return ok(result)
 
 
-@router.post("/api/v1/quotes/unsubscribe", dependencies=[Depends(require_token)])
+@router.post("/api/v1/quotes/unsubscribe", dependencies=[Depends(require_token), Depends(require_writable)])
 async def quotes_unsubscribe(request: Request, payload: QuoteSubscribePayload) -> dict[str, Any]:
     service = get_quote_service(request)
     try:
@@ -419,7 +453,10 @@ async def quotes_subscribed(
     source: str = "local",
 ) -> dict[str, Any]:
     service = get_quote_service(request)
-    acct = account or request.app.state.settings.account.account
+    try:
+        acct = service._account(account)
+    except QuoteServiceError as exc:
+        _raise_quote_error(exc)
     normalized_source = (source or "local").lower()
     if normalized_source in {"broker", "remote", "yuanta"}:
         query_service = get_query_service(request)
@@ -579,7 +616,56 @@ async def stocks_info(
         _raise_query_error(exc)
 
 
-@router.post("/api/v1/orders/stock", dependencies=[Depends(require_token)])
+@router.post("/api/v1/mock/accounts/init", dependencies=[Depends(require_token), Depends(require_writable)])
+async def init_mock_account(
+    request: Request,
+    payload: MockAccountInitPayload,
+) -> dict[str, Any]:
+    service = get_broker_service(request)
+    try:
+        result = service.init_mock_account(
+            payload.account,
+            payload.cash,
+            [position.model_dump() for position in payload.positions],
+        )
+    except BrokerServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": exc.message, "detail": exc.detail},
+        ) from exc
+    return ok(result)
+
+
+@router.get("/api/v1/mock/accounts/{account}", dependencies=[Depends(require_token)])
+async def get_mock_account(request: Request, account: str) -> dict[str, Any]:
+    result = get_broker_service(request).get_mock_account(account)
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "MOCK_ACCOUNT_NOT_FOUND",
+                "message": "mock account not found",
+                "detail": {"account": account},
+            },
+        )
+    return ok(result)
+
+
+@router.delete("/api/v1/mock/accounts/{account}", dependencies=[Depends(require_token), Depends(require_writable)])
+async def deactivate_mock_account(request: Request, account: str) -> dict[str, Any]:
+    """Deactivate a mock account while preserving its ledger history."""
+    service = get_broker_service(request)
+    try:
+        result = service.deactivate_mock_account(account)
+    except BrokerServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": exc.message, "detail": exc.detail},
+        ) from exc
+    return ok(result)
+
+
+@router.post("/api/v1/orders/stock", dependencies=[Depends(require_token), Depends(require_writable)])
 async def submit_stock_order(request: Request, payload: StockOrderPayload) -> dict[str, Any]:
     service = get_broker_service(request)
     request_id = request.headers.get("X-Request-ID")
@@ -604,7 +690,9 @@ async def submit_stock_order(request: Request, payload: StockOrderPayload) -> di
         status_code = exc.status_code if hasattr(exc, "status_code") else 400
         code = exc.code if hasattr(exc, "code") else "ORDER_ERROR"
         message = exc.message if hasattr(exc, "message") else str(exc)
-        detail = getattr(exc, "detail", None) or {}
+        detail = getattr(exc, "detail", None)
+        if detail is None:
+            detail = {}
         raise HTTPException(
             status_code=status_code,
             detail={"code": code, "message": message, "detail": detail},
@@ -619,7 +707,13 @@ async def list_orders(
     status: str | None = None,
 ) -> dict[str, Any]:
     service = get_broker_service(request)
-    return ok(service.list_orders(account=account, status=status))
+    try:
+        return ok(service.list_orders(account=account, status=status))
+    except BrokerServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": exc.message, "detail": exc.detail},
+        ) from exc
 
 
 @router.get("/api/v1/orders/{client_order_id}", dependencies=[Depends(require_token)])
@@ -638,7 +732,7 @@ async def get_order(request: Request, client_order_id: str) -> dict[str, Any]:
     return ok(order)
 
 
-@router.post("/api/v1/control/panic", dependencies=[Depends(require_token)])
+@router.post("/api/v1/control/panic", dependencies=[Depends(require_token), Depends(require_writable)])
 async def control_panic(request: Request) -> dict[str, Any]:
     """Dynamically enable market panic (blocks all trading)."""
     risk_engine = get_risk_engine(request)
@@ -647,7 +741,7 @@ async def control_panic(request: Request) -> dict[str, Any]:
     return ok({"panic": True})
 
 
-@router.post("/api/v1/control/resume", dependencies=[Depends(require_token)])
+@router.post("/api/v1/control/resume", dependencies=[Depends(require_token), Depends(require_writable)])
 async def control_resume(request: Request) -> dict[str, Any]:
     """Dynamically disable market panic and reset the circuit breaker."""
     risk_engine = get_risk_engine(request)
@@ -676,7 +770,7 @@ class ResolveRecoveryPayload(BaseModel):
     note: str | None = None
 
 
-@router.post("/api/v1/recovery/{client_order_id}/resolve", dependencies=[Depends(require_token)])
+@router.post("/api/v1/recovery/{client_order_id}/resolve", dependencies=[Depends(require_token), Depends(require_writable)])
 async def recovery_resolve(
     request: Request,
     client_order_id: str,
@@ -697,12 +791,18 @@ async def recovery_resolve(
                 status_code=400,
                 detail={"code": "ORDER_NO_REQUIRED", "message": "order_no is required for legacy orders"},
             )
-        resolved = store.resolve_legacy_order(
-            order_no=order_no,
-            status=status,
-            trade_date=trade_date,
-            note=note,
-        )
+        try:
+            resolved = store.resolve_legacy_order(
+                order_no=order_no,
+                status=status,
+                trade_date=trade_date,
+                note=note,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "INVALID_RECOVERY_STATUS", "message": str(exc), "detail": {}},
+            ) from exc
         if resolved is None:
             raise HTTPException(
                 status_code=404,
@@ -711,13 +811,24 @@ async def recovery_resolve(
         get_audit(request).record("recovery.resolve", result="success", account=None, client_order_id=client_order_id, source="orders", status=status)
         return ok(resolved)
 
-    resolved = store.resolve_stock_order(
-        client_order_id,
-        status=status,
-        order_no=order_no,
-        trade_date=trade_date,
-        note=note,
-    )
+    try:
+        resolved = store.resolve_stock_order(
+            client_order_id,
+            status=status,
+            order_no=order_no,
+            trade_date=trade_date,
+            note=note,
+        )
+    except MockAccountError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": exc.message, "detail": {}},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "INVALID_RECOVERY_STATUS", "message": str(exc), "detail": {}},
+        ) from exc
     if resolved is None and (order_no or client_order_id):
         legacy_order_no = order_no or client_order_id
         resolved = store.resolve_legacy_order(

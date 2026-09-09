@@ -25,6 +25,8 @@ class FakeTrader:
         self.log_type = None
         self.pmm_server_check = None
         self.mode = None
+        self.login_result = True
+        self.login_error: Exception | None = None
 
     def Open(self, mode) -> None:
         self.mode = mode
@@ -42,7 +44,9 @@ class FakeTrader:
 
     def Login(self, *args) -> bool:
         self.login_args = args
-        return True
+        if self.login_error is not None:
+            raise self.login_error
+        return self.login_result
 
     def SetLogType(self, log_type) -> None:
         self.log_type = log_type
@@ -81,6 +85,79 @@ def test_pfx_login_uses_four_argument_form() -> None:
     adapter.open()
     adapter.login("S98875005091", "1234", pfx_path="/tmp/a.pfx", pfx_pass="yuanta")
     assert trader.login_args == ("/tmp/a.pfx", "yuanta", "S98875005091", "1234")
+
+
+def test_login_false_logs_result_without_credentials(caplog) -> None:
+    adapter, trader = make_adapter(environment="PROD")
+    trader.login_result = False
+    adapter.open()
+
+    with caplog.at_level("DEBUG", logger="stock_broker_tw.yuanta.adapter"):
+        assert adapter.login(
+            "S98875005091",
+            "password-secret",
+            pfx_path="/private/account.pfx",
+            pfx_pass="pfx-secret",
+        ) is False
+
+    assert "accepted=False" in caplog.text
+    assert "environment=PROD" in caplog.text
+    assert "password-secret" not in caplog.text
+    assert "pfx-secret" not in caplog.text
+
+
+def test_login_exception_logs_type_without_credentials(caplog) -> None:
+    adapter, trader = make_adapter()
+    trader.login_error = RuntimeError("password-secret pfx-secret")
+    adapter.open()
+
+    with (
+        caplog.at_level("DEBUG", logger="stock_broker_tw.yuanta.adapter"),
+        pytest.raises(RuntimeError),
+    ):
+        adapter.login(
+            "S98875005091",
+            "password-secret",
+            pfx_path="/private/account.pfx",
+            pfx_pass="pfx-secret",
+        )
+
+    assert "Login() raised" in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert "password-secret" not in caplog.text
+    assert "pfx-secret" not in caplog.text
+
+
+def test_login_response_logs_safe_status(caplog) -> None:
+    adapter, trader = make_adapter()
+    adapter.open()
+    result = types.SimpleNamespace(
+        LoginStatus=types.SimpleNamespace(MsgCode="9999", MsgContent="login failed", Count=0),
+        LoginList=[],
+    )
+
+    with caplog.at_level("DEBUG", logger="stock_broker_tw.yuanta.adapter"):
+        trader.OnResponse[0](1, 7, "Login", None, result)
+
+    assert "Login response received" in caplog.text
+    assert "msg_code=9999" in caplog.text
+    assert "login_entries=0" in caplog.text
+    assert "login failed" not in caplog.text
+
+
+def test_login_response_parse_failure_is_logged(caplog, monkeypatch) -> None:
+    adapter, trader = make_adapter()
+    adapter.open()
+
+    def fail_parse(_value):
+        raise ValueError("bad login payload")
+
+    monkeypatch.setattr("stock_broker_tw.yuanta.adapter.login_result_to_dict", fail_parse)
+    with caplog.at_level("DEBUG", logger="stock_broker_tw.yuanta.adapter"):
+        trader.OnResponse[0](1, 7, "Login", None, object())
+
+    assert "failed to parse Login response" in caplog.text
+    assert "ValueError" in caplog.text
 
 
 def test_login_before_open_raises() -> None:
@@ -281,8 +358,19 @@ def test_timeout_request_does_not_consume_other_request_response() -> None:
 
 
 class FakeSendOrderTrader(FakeTrader):
-    def SendStockOrder(self, account, payload):
+    def SendStockOrder(self, account, payload, lng):
+        self.send_lng = lng
         return True
+
+
+class TypeErrorAfterDispatchTrader(FakeTrader):
+    def __init__(self) -> None:
+        super().__init__()
+        self.send_calls = 0
+
+    def SendStockOrder(self, account, payload, lng=0):
+        self.send_calls += 1
+        raise TypeError("error after dispatch")
 
 
 def test_send_stock_order_matches_by_request_id_identify() -> None:
@@ -319,10 +407,25 @@ def test_send_stock_order_matches_by_request_id_identify() -> None:
     )
     t.join(timeout=3)
     assert not errors
+    assert trader.send_lng == 0
     assert holder["result"]["result_list"][0]["order_no"] == "H00001"
 
 
-def test_request_id_waiter_falls_back_to_unmatched_response() -> None:
+def test_send_stock_order_does_not_retry_type_error_after_dispatch() -> None:
+    trader = TypeErrorAfterDispatchTrader()
+    adapter = YuantaAdapter(trader=trader)
+    adapter.open()
+
+    with pytest.raises(YuantaAdapterError, match="error after dispatch"):
+        adapter.send_stock_order(
+            "S98875005091",
+            {"identify": 1, "stk_code": "2330"},
+            timeout=1,
+        )
+
+    assert trader.send_calls == 1
+
+
     trader = FakeQueryConcurrentTrader()
     adapter = YuantaAdapter(trader=trader)
     adapter.open()
@@ -433,3 +536,185 @@ def test_reversal_dict_is_converted_to_typed_object(monkeypatch) -> None:
     assert typed.StkCode == "2330"
     assert typed.TradeDate == "2026/08/01"
     assert typed.TotalAMT == 105000
+
+
+class FakeDotNetList(list):
+    @classmethod
+    def __class_getitem__(cls, _item):
+        return cls
+
+    def Add(self, item) -> None:
+        self.append(item)
+
+
+class FakeStockOrder:
+    def __init__(self) -> None:
+        for name in (
+            "OrderNo",
+            "TradeDate",
+            "APCode",
+            "TradeKind",
+            "OrderType",
+            "StkCode",
+            "BuySell",
+            "PriceFlag",
+            "Price",
+            "BasketNo",
+            "OrderQty",
+            "Time_in_force",
+            "Identify",
+            "Account",
+        ):
+            setattr(self, name, None)
+
+    def __setattr__(self, name, value) -> None:
+        if name in {"APCode", "Identify"} and value is not None and not isinstance(value, int):
+            raise TypeError("an integer is required")
+        super().__setattr__(name, value)
+
+
+def install_fake_stock_order_modules(monkeypatch) -> None:
+    system = types.ModuleType("System")
+    collections = types.ModuleType("System.Collections")
+    generic = types.ModuleType("System.Collections.Generic")
+    generic.List = FakeDotNetList
+    yuanta = types.ModuleType("YuantaOneAPI")
+    yuanta.StockOrder = FakeStockOrder
+    monkeypatch.setitem(sys.modules, "System", system)
+    monkeypatch.setitem(sys.modules, "System.Collections", collections)
+    monkeypatch.setitem(sys.modules, "System.Collections.Generic", generic)
+    monkeypatch.setitem(sys.modules, "YuantaOneAPI", yuanta)
+
+
+def test_stock_order_payload_coerces_ap_code_and_identify_to_int(monkeypatch) -> None:
+    install_fake_stock_order_modules(monkeypatch)
+
+    payload = YuantaAdapter._build_stock_order_payload(
+        {"ap_code": "0", "identify": "7", "stk_code": "2330"}
+    )
+
+    assert payload[0].APCode == 0
+    assert isinstance(payload[0].APCode, int)
+    assert payload[0].Identify == 7
+    assert isinstance(payload[0].Identify, int)
+
+
+def test_stock_order_payload_does_not_fallback_on_field_type_error(monkeypatch) -> None:
+    install_fake_stock_order_modules(monkeypatch)
+
+    with pytest.raises(YuantaAdapterError, match="APCode must be an integer"):
+        YuantaAdapter._build_stock_order_payload(
+            {"ap_code": "not-an-int", "identify": 1, "stk_code": "2330"}
+        )
+
+
+def test_open_close_open_registers_one_handler() -> None:
+    adapter, trader = make_adapter()
+    adapter.open()
+    adapter.close()
+    adapter.open()
+
+    assert len(trader.OnResponse) == 1
+
+
+def test_send_stock_order_falls_back_to_two_argument_signature() -> None:
+    class TwoArgumentTrader(FakeTrader):
+        def SendStockOrder(self, account, payload):
+            return True
+
+    trader = TwoArgumentTrader()
+    adapter = YuantaAdapter(trader=trader)
+    adapter.open()
+
+    holder: dict[str, object] = {}
+    errors: list[BaseException] = []
+
+    def send() -> None:
+        try:
+            holder["result"] = adapter.send_stock_order(
+                "S98875005091", {"identify": 1}, timeout=1
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=send)
+    thread.start()
+    time.sleep(0.02)
+    adapter._on_response(
+        1,
+        0,
+        "SendStockOrder",
+        None,
+        {"result_list": [{"reply_code": 0, "order_no": "H00001"}]},
+    )
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert not errors
+    assert holder["result"]["result_list"][0]["order_no"] == "H00001"
+
+
+def test_plain_list_response_matches_generated_identify() -> None:
+    trader = FakeSendOrderTrader()
+    adapter = YuantaAdapter(trader=trader)
+    adapter.open()
+    holder: dict[str, object] = {}
+    errors: list[BaseException] = []
+
+    def send() -> None:
+        try:
+            holder["result"] = adapter.send_stock_order(
+                "S98875005091", {"stk_code": "2330"}, request_id="req-plain", timeout=1
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=send)
+    thread.start()
+    time.sleep(0.02)
+    identify = adapter._identify_counter
+    adapter._on_response(
+        1,
+        0,
+        "SendStockOrder",
+        None,
+        {"result_list": [{"identify": identify, "reply_code": 0, "order_no": "H00002"}]},
+    )
+    thread.join(timeout=2)
+
+    assert not errors
+    assert holder["result"]["result_list"][0]["order_no"] == "H00002"
+
+
+def test_system_event_is_cached_and_logged(caplog) -> None:
+    adapter, trader = make_adapter()
+    adapter.open()
+
+    with caplog.at_level("DEBUG", logger="stock_broker_tw.yuanta.adapter"):
+        trader.OnResponse[0](0, 9, "", None, "login service unavailable")
+
+    assert adapter.last_system_event == {
+        "int_mark": 0,
+        "dw_index": 9,
+        "str_index": "",
+        "message": "login service unavailable",
+    }
+    assert "Yuanta system event" in caplog.text
+    assert "login service unavailable" in caplog.text
+
+
+def test_wait_until_ready_returns_after_trading_host_connects() -> None:
+    adapter, trader = make_adapter()
+    adapter.open()
+    result: dict[str, bool] = {}
+
+    def wait() -> None:
+        result["ready"] = adapter.wait_until_ready(timeout=1)
+
+    thread = threading.Thread(target=wait)
+    thread.start()
+    time.sleep(0.02)
+    trader.OnResponse[0](0, 1, "", None, "交易主機Is Connected!!")
+    thread.join(timeout=2)
+
+    assert result["ready"] is True

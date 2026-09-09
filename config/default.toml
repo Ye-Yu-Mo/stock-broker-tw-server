@@ -8,6 +8,7 @@ port = 8000
 api_token = ""
 log_level = "INFO"
 log_json = true
+read_only = false
 
 [yuanta]
 environment = "UAT"
@@ -34,6 +35,12 @@ timeout = 10.0
 rate_limit_per_second = 3
 rate_limit_per_minute = 600
 
+[mock]
+quote_provider = "offline"
+bid1 = 99.0
+ask1 = 101.0
+claim_lease_seconds = 30.0
+
 [rate_limit]
 query_per_second = 3
 query_per_minute = 600
@@ -48,10 +55,11 @@ webhook_type = "generic"
 # 飞书机器人开启签名校验时填写
 secret = ""
 timeout = 3.0
+risk_rejection_dedupe_seconds = 60.0
 
 # 可配置的报警事件：enabled 控制是否推送，title 覆盖默认标题，template 支持 {字段名} 占位。
 [notify.events]
-"risk.rejected" = { enabled = true, title = "风控拒绝", template = "[风控拒绝] {client_order_id} {action} {code} {message}" }
+"risk.rejected" = { enabled = true, title = "风控拒绝", template = "[风控拒绝] {client_order_id} {action} {code} {message} (reason={reason})" }
 "order.status" = { enabled = true, title = "订单状态变化", template = "[订单状态变化] {client_order_id} -> {status} {order_no}" }
 "order.broker_error" = { enabled = true, title = "委托发送异常", template = "[委托异常] {client_order_id} {error}" }
 "risk.panic" = { enabled = true, title = "Panic 变化", template = "[Panic] old={old} new={panic}" }

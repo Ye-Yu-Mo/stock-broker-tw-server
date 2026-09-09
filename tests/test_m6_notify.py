@@ -7,6 +7,7 @@ from unittest import mock
 
 import pytest
 
+from stock_broker_tw.metrics import metrics
 from stock_broker_tw.notify import Notifier, format_message
 
 
@@ -15,6 +16,19 @@ def test_format_message_contains_title_and_fields() -> None:
     assert "订单状态变化" in text
     assert "C001" in text
     assert "FILLED" in text
+
+
+def test_format_template_supports_legacy_message_and_reason() -> None:
+    from stock_broker_tw.notify import format_template
+
+    text = format_template(
+        "{message} | {reason}",
+        "risk.rejected",
+        "风控拒绝",
+        {"reason": "ORDER_QTY_EXCEEDED"},
+    )
+
+    assert text == "ORDER_QTY_EXCEEDED | ORDER_QTY_EXCEEDED"
 
 
 def test_notifier_disabled_without_webhook() -> None:
@@ -108,6 +122,8 @@ def test_notifier_uses_lark_alert_card_when_installed() -> None:
     assert card.kwargs["service"] == "stock-broker-tw-server"
     assert card.kwargs["node"] == "local"
     assert card.data["title"] == "订单状态变化"
+    assert card.data["summary"] == "order.status · C001"
+    assert card.data["details"] is None
     data = json.loads(card.to_json())
     assert data["msg_type"] == "interactive"
 
@@ -116,6 +132,15 @@ def test_notifier_unreachable_webhook_does_not_raise() -> None:
     notifier = Notifier(enabled=True, webhook_url="http://example.test/hook", timeout=0.01)
     with mock.patch("urllib.request.urlopen", side_effect=RuntimeError("network down")):
         assert notifier.send("order.updated", "title", {}) is False
+
+
+def test_notifier_unreachable_webhook_is_counted() -> None:
+    notifier = Notifier(enabled=True, webhook_url="http://example.test/hook", timeout=0.01)
+    before = metrics.notifications_failed_total.labels(event="risk.rejected")._value.get()
+    with mock.patch("urllib.request.urlopen", side_effect=RuntimeError("network down")):
+        assert notifier.send("risk.rejected", "风控拒绝", {"reason": "BLACKLISTED"}) is False
+    after = metrics.notifications_failed_total.labels(event="risk.rejected")._value.get()
+    assert after == before + 1
 
 
 def test_notifier_event_disabled_returns_false() -> None:

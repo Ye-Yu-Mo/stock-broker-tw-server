@@ -46,11 +46,12 @@
 |---|---|---|
 | 401 | `UNAUTHORIZED` | 缺少或错误的 token |
 | 400 | `INVALID_REQUEST` / `INVALID_DATE` / `MAX_PER_REQUEST_EXCEEDED` 等 | 请求参数错误 |
-| 404 | `ORDER_NOT_FOUND` | 订单不存在 |
-| 409 | `IDEMPOTENCY_CONFLICT` | `client_order_id` 已被不同操作使用 |
-| 429 | `RATE_LIMITED` | 触发限流 |
-| 502 | `QUERY_ERROR` / `SUBSCRIBE_FAILED` / `ORDER_REJECTED` 等 | 元大接口调用失败 |
-| 503 | `CIRCUIT_OPEN` | 熔断开启，写接口暂时不可用 |
+| 404 | `ORDER_NOT_FOUND` / `MOCK_ACCOUNT_NOT_FOUND` | 订单或 Mock 账户不存在 |
+| 409 | `IDEMPOTENCY_CONFLICT` / `MOCK_ACCOUNT_INACTIVE` / `MOCK_ORDER_FINAL` / `MOCK_OPERATION_UNSUPPORTED` | 幂等冲突、账户停用或 Mock 操作不支持 |
+| 429 | `RATE_LIMITED` | 触发限流；Mock provider 的限流错误保留此状态码 |
+| 502 | `QUERY_ERROR` / `MOCK_QUOTE_UNAVAILABLE` / `SUBSCRIBE_FAILED` / `ORDER_REJECTED` 等 | 元大接口、外部行情或订单调用失败 |
+| 503 | `CIRCUIT_OPEN` / `MOCK_QUOTE_PROVIDER_REQUIRED` | 熔断开启或未配置 Mock 行情 provider |
+| 504 | `QUERY_TIMEOUT` | 查询或显式注入的行情 provider 超时 |
 
 ## 2. 健康与监控
 
@@ -70,7 +71,7 @@ GET /health
   "event_queue_size": 0,
   "audit_enabled": true,
   "audit_file": null,
-  "version": "0.1.0",
+  "version": "0.1.3",
   "environment": "UAT",
   "panic": false,
   "circuit_breaker_open": false,
@@ -167,7 +168,7 @@ GET /api/v1/session/status
 
 ## 4. 账户与查询
 
-所有查询接口均可选传 `account`；缺省使用服务端默认账户。
+所有查询接口均可选传 `account`；缺省使用服务端默认账户。当前服务为单账户模式，显式传入的真实账户必须与服务端配置账户一致，否则返回 `ACCOUNT_NOT_ALLOWED`。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -277,6 +278,8 @@ POST /api/v1/orders/stock
 }
 ```
 
+`client_order_id` 是本地幂等键，允许 1–64 位 Unicode 字符；发送至元大时，服务端会生成稳定的 `BasketNo`（最多 32 位 ASCII 英数字），不会截断客户端 ID。新单未传 `trade_date` 时服务端使用当天的 `YYYY/MM/DD`。
+
 #### 撤单
 
 ```json
@@ -321,14 +324,48 @@ POST /api/v1/orders/stock
 
 > 注意：`replace` 不允许同时传 `new_price` 和 `new_quantity`，否则返回 `REPLACE_BOTH_FIELDS_UNSUPPORTED`。
 
+字段约束：`side` 只能为 `B`/`S`；`time_in_force` 只能为 `ROD`/`IOC`/`FOK`；`price_flag` 只能为 `LIMIT`/`M`/`H`/`L`/`-`；`ap_code` 推荐使用语义值 `REGULAR`（整股）、`ODD_LOT`（零股）、`INTRADAY_ODD_LOT`（盘中零股）或 `AFTER_HOURS`（盘后），同时兼容旧数字 `0`、`2`、`4`、`7`。改量时 `new_quantity` 必须为正整数。限价单价格必须为正，市价等非限价订单价格可省略或为 `0`。
+
 ### 6.2 幂等性
 
 `client_order_id` 是幂等键：
 
-- 同一 `client_order_id` 相同 `action` 重复提交不会重复送单。
-- 同一 `client_order_id` 不同 `action` 返回 `IDEMPOTENCY_CONFLICT`。
+- 同一 `client_order_id`、同一账户、相同 `action` 重复提交不会重复送单或重复撮合。
+- 同一 `client_order_id` 被不同账户、不同模式（Mock/真实）或不同 `action` 使用时，返回 `IDEMPOTENCY_CONFLICT`。
+- 首次请求原子 claim 成功后才拥有执行权；并发竞争请求只返回已有订单状态。看到 `PENDING` 表示订单已被接收但仍在执行，不应再次并发提交同一 ID。
+- Mock 报价失败且订单尚未结算时，订单为 `FAILED` 且 `data.retryable=true`。之后的同 ID Mock 请求可重新 claim 一次执行权，并递增 `data.execution.attempt`。
+- `REJECTED`、`FILLED`、`CANCELLED` 不自动重试；真实券商失败也不自动重试，因为请求可能已经到达券商。
 
-### 6.3 订单状态
+### 6.3 Mock 账户与离线撮合
+
+Mock 账户必须使用独立的 `MOCK-` 命名空间，例如 `MOCK-TEST`。初始化接口：
+
+```
+POST /api/v1/mock/accounts/init
+```
+
+```json
+{
+  "account": "MOCK-TEST",
+  "cash": 100000.0,
+  "positions": []
+}
+```
+
+默认 Mock 行情来自服务端配置的离线固定盘口（默认 bid1=99.0、ask1=101.0），不需要登录元大、不需要 UAT，也不会调用 Spark API。若要使用外部/实时盘口，必须由应用显式注入 `mock_quote_provider`，不能由 Mock 路径自动复用真实行情。
+
+- Mock 买单按 ask1 成交，Mock 卖单按 bid1 成交，默认全部成交。
+- `mock=true` 的订单只能使用 `MOCK-*` 账户；`mock=false` 不能使用 Mock 账户。
+- Mock 撤单/改单当前不会发送 Spark API。已成交订单返回 `MOCK_ORDER_FINAL`（409）；未决但不支持的操作返回 `MOCK_OPERATION_UNSUPPORTED`（409）。
+- 停用账户但保留历史账本：
+
+```
+DELETE /api/v1/mock/accounts/{account}
+```
+
+停用后新订单返回 `MOCK_ACCOUNT_INACTIVE`（409）。
+
+### 6.4 订单状态
 
 | 状态 | 含义 |
 |---|---|
@@ -342,7 +379,7 @@ POST /api/v1/orders/stock
 | `FAILED` | 本地失败 |
 | `NEED_MANUAL_REVIEW` | 需要人工确认 |
 
-### 6.4 查询订单
+### 6.5 查询订单
 
 ```
 GET /api/v1/orders?account=S98875005091&status=ACCEPTED

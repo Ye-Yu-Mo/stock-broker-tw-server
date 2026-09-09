@@ -43,6 +43,7 @@ cp config/default.toml config/syz.toml
 host = "127.0.0.1"
 port = 8000
 api_token = "your-token"
+read_only = false
 
 [yuanta]
 environment = "UAT"          # UAT 或 PROD
@@ -85,6 +86,9 @@ quote_per_second = 10
 trade_per_second = 10
 trade_max_batch = 30
 
+# 下单 ap_code 推荐使用语义值：REGULAR / ODD_LOT / INTRADAY_ODD_LOT / AFTER_HOURS。
+# 兼容旧客户端数字：0 / 2 / 4 / 7。
+
 [notify]
 enabled = false
 webhook_url = ""
@@ -93,7 +97,7 @@ timeout = 3.0
 
 # 可配置的报警事件：enabled 控制是否推送，title 覆盖默认标题，template 支持 {字段名} 占位。
 [notify.events]
-"risk.rejected" = { enabled = true, title = "风控拒绝", template = "[风控拒绝] {client_order_id} {action} {code} {message}" }
+"risk.rejected" = { enabled = true, title = "风控拒绝", template = "[风控拒绝] {client_order_id} {action} {code} {message} (reason={reason})" }
 "order.status" = { enabled = true, title = "订单状态变化", template = "[订单状态变化] {client_order_id} -> {status} {order_no}" }
 "order.broker_error" = { enabled = true, title = "委托发送异常", template = "[委托异常] {client_order_id} {error}" }
 "risk.panic" = { enabled = true, title = "Panic 变化", template = "[Panic] old={old} new={panic}" }
@@ -106,6 +110,7 @@ timeout = 3.0
 
 ```bash
 export YUANTA_SERVER__API_TOKEN=your-token
+export YUANTA_SERVER__READ_ONLY=false
 export YUANTA_ACCOUNT__ACCOUNT=S98875005091
 export YUANTA_NOTIFY__WEBHOOK_URL=https://example.com/hook
 ```

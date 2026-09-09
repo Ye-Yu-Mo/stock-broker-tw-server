@@ -64,8 +64,12 @@ def test_positions_queries_and_saves_snapshot(tmp_path: Path) -> None:
 
 def test_balance_and_settlement_use_account(tmp_path: Path) -> None:
     service, adapter = make_service(tmp_path, FakeAdapter({"bank_balance_list": []}))
-    run(service.account_balance(account="S123"))
-    assert adapter.calls[-1] == ("GetBankBalance", {"Account": "S123"})
+    with pytest.raises(QueryError) as exc_info:
+        run(service.account_balance(account="S123"))
+    assert exc_info.value.code == "ACCOUNT_NOT_ALLOWED"
+
+    run(service.account_balance())
+    assert adapter.calls[-1] == ("GetBankBalance", {"Account": "S98875005091"})
 
     service2, adapter2 = make_service(tmp_path, FakeAdapter({"transaction_outlay_list": []}))
     run(service2.settlement())
