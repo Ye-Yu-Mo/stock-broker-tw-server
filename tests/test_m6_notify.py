@@ -18,6 +18,19 @@ def test_format_message_contains_title_and_fields() -> None:
     assert "FILLED" in text
 
 
+def test_format_template_supports_legacy_message_and_reason() -> None:
+    from stock_broker_tw.notify import format_template
+
+    text = format_template(
+        "{message} | {reason}",
+        "risk.rejected",
+        "风控拒绝",
+        {"reason": "ORDER_QTY_EXCEEDED"},
+    )
+
+    assert text == "ORDER_QTY_EXCEEDED | ORDER_QTY_EXCEEDED"
+
+
 def test_notifier_disabled_without_webhook() -> None:
     notifier = Notifier(enabled=True, webhook_url="")
     assert notifier.enabled is False
@@ -130,6 +143,7 @@ def test_notifier_unreachable_webhook_is_counted() -> None:
     assert after == before + 1
 
 
+def test_notifier_event_disabled_returns_false() -> None:
     class EventCfg:
         enabled = False
         title = "忽略"

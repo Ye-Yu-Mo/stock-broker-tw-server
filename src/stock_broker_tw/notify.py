@@ -53,7 +53,15 @@ def format_template(template: str, event: str, title: str, fields: dict[str, Any
     Available placeholders include ``{event}``, ``{title}`` and any field name
     from ``fields``.  Missing fields render as empty strings.
     """
-    values = _SafeFormatDict({"event": event, "title": title, **fields})
+    values = _SafeFormatDict(
+        {
+            "event": event,
+            "title": title,
+            "message": fields.get("message", fields.get("reason", "")),
+            "reason": fields.get("reason", fields.get("message", "")),
+            **fields,
+        }
+    )
     return template.format_map(values)
 
 

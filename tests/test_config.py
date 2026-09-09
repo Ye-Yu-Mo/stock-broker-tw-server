@@ -94,6 +94,7 @@ from stock_broker_tw.config import (
     QueryConfig,
     QuoteConfig,
     RateLimitConfig,
+    ServerConfig,
     Settings,
     resolve_query_rate_limits,
     resolve_quote_rate_limits,
@@ -126,3 +127,8 @@ def test_resolve_quote_rate_limits_new_unified_wins(tmp_path: Path) -> None:
         quote=QuoteConfig(rate_limit_per_second=8),
     )
     assert resolve_quote_rate_limits(settings) == (12, 1200)
+
+
+def test_server_read_only_setting_is_preserved() -> None:
+    settings = Settings(server=ServerConfig(read_only=True))
+    assert settings.server.read_only is True

@@ -7,6 +7,7 @@ should use this class instead of touching pythonnet directly.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import threading
 import time
@@ -68,8 +69,14 @@ class YuantaAdapter:
         self._closed = False
         self._disposed = False
         self._last_login_result: dict[str, Any] | None = None
+        self._last_system_event: dict[str, Any] | None = None
         self._query_responses: dict[str, dict[str, list[Any]]] = {}
         self._query_cond = threading.Condition()
+        self._system_cond = threading.Condition()
+        self._trading_host_ready = False
+        self._identify_lock = threading.Lock()
+        self._identify_counter = 0
+        self._registered_trader: Any = None
 
     @property
     def trader(self) -> Any:
@@ -95,9 +102,34 @@ class YuantaAdapter:
     def last_login_result(self) -> dict[str, Any] | None:
         return self._last_login_result
 
+    @property
+    def last_system_event(self) -> dict[str, Any] | None:
+        return self._last_system_event
+
+    def wait_until_ready(self, timeout: float = 15.0) -> bool:
+        """Wait until the SDK reports that the trading host is connected."""
+        deadline = time.monotonic() + timeout
+        with self._system_cond:
+            while not self._trading_host_ready:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._system_cond.wait(remaining)
+            return True
+
+    @staticmethod
+    def _is_trading_host_event(message: str) -> bool:
+        normalized = "".join(str(message).lower().split())
+        return (
+            "交易主机isconnected" in normalized
+            or "交易主機isconnected" in normalized
+            or "tradinghostisconnected" in normalized
+        )
+
     def reset_login_result(self) -> None:
         """Clear the cached login result before a new login attempt."""
         self._last_login_result = None
+        self._last_system_event = None
 
     def open(self) -> None:
         """Open the Yuanta API connection.
@@ -108,6 +140,9 @@ class YuantaAdapter:
             raise YuantaAdapterError("adapter has been disposed")
         if self._opened:
             return
+
+        with self._system_cond:
+            self._trading_host_ready = False
 
         logger.debug(
             "Yuanta Open() request: environment=%s log_type=%s pmm_server_check=%s",
@@ -225,9 +260,9 @@ class YuantaAdapter:
         set_log_type = getattr(self._trader, "SetLogType", None)
         if callable(set_log_type):
             try:
-                set_log_type(self._log_type)
-            except Exception:
-                pass
+                set_log_type(loader.get_log_type(self._log_type))
+            except Exception as exc:
+                logger.warning("Yuanta SetLogType failed: %s", type(exc).__name__)
         set_pmm = getattr(self._trader, "SetPMMServerCheck", None)
         if callable(set_pmm):
             try:
@@ -236,7 +271,7 @@ class YuantaAdapter:
                 pass
 
     def _register_event_handler(self) -> None:
-        if self._trader is None:
+        if self._trader is None or self._registered_trader is self._trader:
             return
         try:
             from YuantaOneAPI import OnResponseEventHandler
@@ -251,6 +286,7 @@ class YuantaAdapter:
                 self._trader.OnResponse.append(handler)
             else:
                 self._trader.OnResponse += handler
+            self._registered_trader = self._trader
 
     def _resolve_environment_mode(self) -> Any:
         try:
@@ -266,6 +302,26 @@ class YuantaAdapter:
         obj_handle: Any,
         obj_value: Any,
     ) -> None:
+        if int_mark == 0:
+            message = str(to_dict(obj_value))[:1024]
+            self._last_system_event = {
+                "int_mark": int(int_mark),
+                "dw_index": int(dw_index),
+                "str_index": str(str_index or ""),
+                "message": message,
+            }
+            if self._is_trading_host_event(message):
+                with self._system_cond:
+                    self._trading_host_ready = True
+                    self._system_cond.notify_all()
+            logger.debug(
+                "Yuanta system event: int_mark=%s dw_index=%s str_index=%r message=%s",
+                int_mark,
+                dw_index,
+                str_index,
+                message,
+            )
+
         # Serialize query/trade payloads before putting the event on the queue
         # so the event can carry the correlation id used by concurrent waiters.
         response_id: str | None = None
@@ -278,6 +334,13 @@ class YuantaAdapter:
                 data = None
             if data is not None:
                 response_id = self._extract_response_request_id(data)
+                if str_index == "SendStockOrder":
+                    logger.debug(
+                        "SendStockOrder response: response_id=%s data_type=%s data_keys=%s",
+                        response_id,
+                        type(data).__name__,
+                        sorted(data.keys()) if isinstance(data, dict) else None,
+                    )
 
         if str_index == "Login":
             logger.debug(
@@ -405,28 +468,55 @@ class YuantaAdapter:
         if not callable(method):
             raise YuantaAdapterError("unknown Yuanta function: SendStockOrder")
 
-        payload = self._build_stock_order_payload(orders)
+        prepared_orders = self._prepare_stock_orders(orders)
+        effective_identify = self._next_identify() if request_id is not None else None
+        if effective_identify is not None and isinstance(prepared_orders, list):
+            for item in prepared_orders:
+                if isinstance(item, dict):
+                    item["identify"] = effective_identify
+        payload = self._build_stock_order_payload(prepared_orders)
+        response_request_id = str(effective_identify) if effective_identify is not None else request_id
+        language = loader.get_language_type("Normal")
+        logger.debug(
+            "SendStockOrder dispatch: request_id=%s identify=%s payload_type=%s language=%s",
+            request_id,
+            effective_identify,
+            type(payload).__name__,
+            language,
+        )
         try:
-            accepted = method(account, payload)
-        except TypeError:
-            # Some bindings/signatures expect a third lng argument.
-            accepted = method(account, payload, 0)
+            accepted = self._call_send_stock_order(method, account, payload, language)
         except Exception as exc:
             raise YuantaAdapterError(f"SendStockOrder call failed: {exc}") from exc
         if not accepted:
             raise YuantaAdapterError("SendStockOrder was rejected")
 
+        logger.debug(
+            "SendStockOrder accepted: request_id=%s identify=%s waiting_key=%s",
+            request_id,
+            effective_identify,
+            response_request_id,
+        )
         deadline = time.monotonic() + timeout
         with self._query_cond:
             while True:
                 response = self._take_response_locked(
-                    "SendStockOrder", request_id
+                    "SendStockOrder", response_request_id
                 )
+                if response is None and request_id is not None and request_id != response_request_id:
+                    response = self._take_response_locked("SendStockOrder", request_id)
                 if response is not None:
                     return response
 
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    bucket = self._query_responses.get("SendStockOrder", {})
+                    logger.warning(
+                        "SendStockOrder response timeout: request_id=%s waiting_key=%s pending_keys=%s",
+                        request_id,
+                        response_request_id,
+                        sorted(bucket.keys()),
+                    )
                     request_suffix = f" request_id={request_id}" if request_id else ""
                     raise TimeoutError(
                         f"timed out after {timeout:.1f}s waiting for "
@@ -435,46 +525,113 @@ class YuantaAdapter:
                 self._query_cond.wait(remaining)
 
     @staticmethod
+    def _call_send_stock_order(method: Any, account: str, payload: Any, language: Any) -> Any:
+        """Call either the documented or legacy SendStockOrder overload."""
+        try:
+            parameters = inspect.signature(method).parameters.values()
+            positional = [
+                parameter
+                for parameter in parameters
+                if parameter.kind
+                in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}
+            ]
+            accepts_varargs = any(
+                parameter.kind == inspect.Parameter.VAR_POSITIONAL for parameter in parameters
+            )
+            signature_known = True
+        except (TypeError, ValueError):
+            positional = []
+            accepts_varargs = True
+            signature_known = False
+
+        if signature_known:
+            if not accepts_varargs and len(positional) <= 2:
+                return method(account, payload)
+            return method(account, payload, language)
+        try:
+            return method(account, payload, language)
+        except TypeError:
+            return method(account, payload)
+
+    def _next_identify(self) -> int:
+        """Return a unique integer correlation id for the .NET API."""
+        with self._identify_lock:
+            self._identify_counter = (self._identify_counter % 2_147_483_646) + 1
+            return self._identify_counter
+
+    @staticmethod
+    def _prepare_stock_orders(orders: Any) -> Any:
+        if isinstance(orders, dict):
+            return [dict(orders)]
+        if isinstance(orders, (list, tuple)):
+            prepared = []
+            for item in orders:
+                if hasattr(item, "to_dict") and callable(item.to_dict):
+                    prepared.append(item.to_dict())
+                elif isinstance(item, dict):
+                    prepared.append(dict(item))
+                else:
+                    prepared.append(item)
+            return prepared
+        if hasattr(orders, "to_dict") and callable(orders.to_dict):
+            return [orders.to_dict()]
+        return orders
+
+    @staticmethod
     def _build_stock_order_payload(orders: Any) -> Any:
         """Convert plain dicts to a .NET ``List[StockOrder]`` when possible."""
         if isinstance(orders, dict):
             orders = [orders]
         elif hasattr(orders, "to_dict") and callable(orders.to_dict):
             orders = [orders.to_dict()]
-        if isinstance(orders, (list, tuple)):
-            try:
+        if not isinstance(orders, (list, tuple)):
+            return orders
 
-                from System.Collections.Generic import List
-                from YuantaOneAPI import StockOrder
+        try:
+            from System.Collections.Generic import List
+            from YuantaOneAPI import StockOrder
+        except Exception:
+            # Plain Python fakes do not have the optional .NET assembly.
+            return list(orders)
 
-                result = List[StockOrder]()
-                for raw_item in orders:
-                    item = raw_item.to_dict() if hasattr(raw_item, "to_dict") else raw_item
-                    so = StockOrder()
-                    for key, value in item.items():
-                        attr = {
-                            "order_no": "OrderNo",
-                            "trade_date": "TradeDate",
-                            "ap_code": "APCode",
-                            "trade_kind": "TradeKind",
-                            "order_type": "OrderType",
-                            "stk_code": "StkCode",
-                            "buy_sell": "BuySell",
-                            "price_flag": "PriceFlag",
-                            "price": "Price",
-                            "basket_no": "BasketNo",
-                            "order_qty": "OrderQty",
-                            "time_in_force": "Time_in_force",
-                            "identify": "Identify",
-                            "account": "Account",
-                        }.get(str(key), str(key))
-                        if hasattr(so, attr):
-                            setattr(so, attr, value)
-                    result.Add(so)
-                return result
-            except Exception:
-                return list(orders)
-        return orders
+        result = List[StockOrder]()
+        for raw_item in orders:
+            item = raw_item.to_dict() if hasattr(raw_item, "to_dict") else raw_item
+            so = StockOrder()
+            for key, value in item.items():
+                attr = {
+                    "order_no": "OrderNo",
+                    "trade_date": "TradeDate",
+                    "ap_code": "APCode",
+                    "trade_kind": "TradeKind",
+                    "order_type": "OrderType",
+                    "stk_code": "StkCode",
+                    "buy_sell": "BuySell",
+                    "price_flag": "PriceFlag",
+                    "price": "Price",
+                    "basket_no": "BasketNo",
+                    "order_qty": "OrderQty",
+                    "time_in_force": "Time_in_force",
+                    "identify": "Identify",
+                    "account": "Account",
+                }.get(str(key), str(key))
+                if not hasattr(so, attr):
+                    continue
+                if attr in {"APCode", "Identify"}:
+                    try:
+                        value = int(value)
+                    except (TypeError, ValueError) as exc:
+                        raise YuantaAdapterError(
+                            f"{attr} must be an integer"
+                        ) from exc
+                try:
+                    setattr(so, attr, value)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise YuantaAdapterError(
+                        f"invalid {attr} value for SendStockOrder"
+                    ) from exc
+            result.Add(so)
+        return result
 
     def subscribe(
         self,

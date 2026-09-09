@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from time import perf_counter
 from typing import Any
@@ -13,7 +14,7 @@ from stock_broker_tw.api.http import router as http_router
 from stock_broker_tw.api.ws import ConnectionManager
 from stock_broker_tw.api.ws import router as ws_router
 from stock_broker_tw.audit import AuditLogger, setup_logging
-from stock_broker_tw.broker.service import BrokerService
+from stock_broker_tw.broker.service import BrokerService, OfflineQuoteProvider
 from stock_broker_tw.config import (
     Settings,
     load_settings,
@@ -34,10 +35,13 @@ from stock_broker_tw.state.recovery import run_startup_recovery
 from stock_broker_tw.state.store import StateStore
 from stock_broker_tw.yuanta.adapter import YuantaAdapter
 
+logger = logging.getLogger(__name__)
+
 
 def create_app(
     settings: Settings | None = None,
     adapter: YuantaAdapter | Any | None = None,
+    mock_quote_provider: Any = None,
 ) -> FastAPI:
     """Build a FastAPI app with the given settings and adapter.
 
@@ -109,6 +113,11 @@ def create_app(
     )
     risk_engine = RiskEngine(settings, notifier=notifier)
     order_queue = SerialOrderQueue()
+    if mock_quote_provider is None and settings.mock.quote_provider == "offline":
+        mock_quote_provider = OfflineQuoteProvider(
+            bid1=settings.mock.bid1,
+            ask1=settings.mock.ask1,
+        )
     broker_service = BrokerService(
         adapter,
         settings,
@@ -121,6 +130,7 @@ def create_app(
         circuit_breaker=circuit_breaker,
         notifier=notifier,
         query_service=query_service,
+        mock_quote_provider=mock_quote_provider,
     )
     report_handler = ReportHandler(state_store, broadcaster=ws_manager, notifier=notifier)
 
@@ -147,7 +157,16 @@ def create_app(
         )
         app.state.last_recovery = last_recovery
         yield
-        await ws_manager.stop()
+        try:
+            await ws_manager.stop()
+        finally:
+            for method_name in ("close", "dispose"):
+                method = getattr(adapter, method_name, None)
+                if callable(method):
+                    try:
+                        method()
+                    except Exception as exc:  # noqa: BLE001 - shutdown must continue
+                        logger.warning("adapter %s during shutdown failed: %s", method_name, exc)
 
     app = FastAPI(
         title="stock-broker-tw-server",

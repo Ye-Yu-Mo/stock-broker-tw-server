@@ -92,10 +92,6 @@ def setup_logging(settings: Any) -> None:
     log_json = getattr(settings.server, "log_json", True)
 
     handlers: list[logging.Handler] = [logging.StreamHandler()]
-    audit_file = getattr(settings.audit, "file", None)
-    if audit_file:
-        Path(audit_file).parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(audit_file, encoding="utf-8"))
 
     formatter: logging.Formatter
     if log_json:

@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, FiniteFloat
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -36,6 +36,7 @@ class ServerConfig(BaseModel):
     api_token: str = ""
     log_level: str = "INFO"
     log_json: bool = True
+    read_only: bool = False
 
 
 class YuantaConfig(BaseModel):
@@ -85,6 +86,15 @@ class QuoteConfig(BaseModel):
     max_per_request: int = 200
     max_total_subscriptions: int = 2000
     rate_limit_per_second: int = 10
+
+
+class MockConfig(BaseModel):
+    """Offline quote source used by the isolated mock trading path."""
+
+    quote_provider: Literal["offline", "injected"] = "offline"
+    bid1: FiniteFloat = Field(99.0, gt=0)
+    ask1: FiniteFloat = Field(101.0, gt=0)
+    claim_lease_seconds: FiniteFloat = Field(30.0, gt=0)
 
 
 class RateLimitConfig(BaseModel):
@@ -140,6 +150,7 @@ _LEGACY_ENV_MAP: dict[str, dict[str, str]] = {
         "api_token": "yuanta_api_token",
         "log_level": "yuanta_log_level",
         "log_json": "yuanta_log_json",
+        "read_only": "yuanta_read_only",
     },
     "account": {
         "account": "yuanta_account",
@@ -250,6 +261,7 @@ class Settings(BaseSettings):
     state: StateConfig = StateConfig()
     query: QueryConfig = QueryConfig()
     quote: QuoteConfig = QuoteConfig()
+    mock: MockConfig = MockConfig()
     rate_limit: RateLimitConfig = RateLimitConfig()
     notify: NotifyConfig = NotifyConfig()
     risk: RiskConfig = RiskConfig()

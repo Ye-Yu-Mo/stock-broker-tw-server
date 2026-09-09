@@ -121,6 +121,40 @@ load_assembly = ensure_loaded
 setup = ensure_loaded
 
 
+def get_language_type(language: str = "Normal") -> Any:
+    """Map a language name to the SDK enum, with a test-safe numeric fallback."""
+    try:
+        from YuantaOneAPI import enumLangType
+    except Exception:
+        return {"NORMAL": 0, "UTF8": 1, "SC": 2}.get(str(language).upper(), 0)
+    normalized = str(language).upper()
+    for candidate in (normalized, normalized.capitalize()):
+        value = getattr(enumLangType, candidate, None)
+        if value is not None:
+            return value
+    return 0
+
+
+def get_log_type(log_type: str = "COMMON") -> Any:
+    """Map project log aliases to the SDK's actual enum values."""
+    aliases = {
+        "DEBUG": "ALL",
+        "ERROR": "COMMON",
+        "SYSTEM": "System",
+        "COMMON_WITH_QUOTE": "COMMON_WITH_QUOTE",
+        "COMMON": "COMMON",
+        "NONE": "NONE",
+        "ALL": "ALL",
+    }
+    name = aliases.get(str(log_type).upper(), "COMMON")
+    fallback = {"NONE": 0, "System": 1, "COMMON": 2, "COMMON_WITH_QUOTE": 3, "ALL": 4}
+    try:
+        from YuantaOneAPI import enumLogType
+    except Exception:
+        return fallback[name]
+    return getattr(enumLogType, name, enumLogType.COMMON)
+
+
 def get_environment_mode(environment: str) -> Any:
     """Map ``"UAT"``/``"PROD"`` to the Yuanta enum value.
 
@@ -148,17 +182,9 @@ def create_trader(
     """Load the assembly and create a configured ``YuantaSparkAPITrader``."""
     ensure_loaded(spark_api_dir)
 
-    from YuantaOneAPI import YuantaSparkAPITrader, enumLogType
+    from YuantaOneAPI import YuantaSparkAPITrader
 
     trader = YuantaSparkAPITrader()
-
-    log_type_map = {
-        "COMMON": getattr(enumLogType, "COMMON", None),
-        "NONE": getattr(enumLogType, "NONE", None),
-        "DEBUG": getattr(enumLogType, "DEBUG", None),
-        "ERROR": getattr(enumLogType, "ERROR", None),
-    }
-    if log_type_map.get(log_type.upper()) is not None:
-        trader.SetLogType(log_type_map[log_type.upper()])
+    trader.SetLogType(get_log_type(log_type))
     trader.SetPMMServerCheck(bool(pmm_server_check))
     return trader

@@ -37,6 +37,8 @@ class FakeAdapter:
         self.disposed = False
         self.last_login_result = None
         self.logout_called = False
+        self.close_called = False
+        self.dispose_called = False
 
     def open(self) -> None:
         self.opened = True
@@ -56,6 +58,12 @@ class FakeAdapter:
         self.logout_called = True
         self.logged_in = False
         return True
+
+    def close(self) -> None:
+        self.close_called = True
+
+    def dispose(self) -> None:
+        self.dispose_called = True
 
 
 def make_client() -> TestClient:
@@ -118,7 +126,33 @@ def test_logout_via_api() -> None:
         assert res.status_code == 200, res.text
 
 
-def test_metrics_endpoint_is_also_available_via_api() -> None:
-    with make_client() as client:
-        res = client.get("/api/v1/session/status", headers=auth())
-        assert res.status_code == 200
+def test_lifespan_closes_and_disposes_adapter() -> None:
+    adapter = FakeAdapter()
+    settings = Settings(
+        server=ServerConfig(api_token="test-token"),
+        account=AccountConfig(account="S98875005091", password="1234"),
+    )
+    app = create_app(settings=settings, adapter=adapter)
+
+    with TestClient(app):
+        pass
+
+    assert adapter.close_called is True
+    assert adapter.dispose_called is True
+
+
+def test_health_is_degraded_when_adapter_is_open_but_logged_out() -> None:
+    adapter = FakeAdapter()
+    adapter.opened = True
+    settings = Settings(
+        server=ServerConfig(api_token="test-token"),
+        account=AccountConfig(account="S98875005091", password="1234"),
+    )
+    app = create_app(settings=settings, adapter=adapter)
+
+    with TestClient(app) as client:
+        body = client.get("/health").json()
+
+    assert body["adapter_ready"] is True
+    assert body["login_status"] is False
+    assert body["status"] == "degraded"
