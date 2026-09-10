@@ -343,6 +343,17 @@ class YuantaAdapter:
                         sorted(data.keys()) if isinstance(data, dict) else None,
                     )
 
+        logger.debug(
+            "Yuanta response event: int_mark=%s dw_index=%s str_index=%r "
+            "obj_type=%s response_id=%s data_keys=%s",
+            int_mark,
+            dw_index,
+            str_index,
+            type(obj_value).__name__,
+            response_id,
+            sorted(data.keys()) if isinstance(data, dict) else None,
+        )
+
         if str_index == "Login":
             logger.debug(
                 "Login response received: int_mark=%s dw_index=%s",
@@ -682,8 +693,10 @@ class YuantaAdapter:
             accepted = method(account, payload, 0)
         except Exception as exc:
             raise YuantaAdapterError(f"{function_name} call failed: {exc}") from exc
-        if not accepted:
+        if accepted is False:
             raise YuantaAdapterError(f"{function_name} was rejected")
+        # The real SDK returns System.Void; its asynchronous OnResponse event
+        # carries the eventual subscription status.
         return True
 
     @staticmethod
@@ -888,14 +901,35 @@ class YuantaAdapter:
             raise YuantaAdapterError(f"unknown Yuanta function: {function_name}")
 
         kwargs = self._convert_query_object_params(function_name, kwargs)
+        query_args = args
+        query_kwargs = kwargs
+        if (
+            function_name == "GetStkTickDetail"
+            and not args
+            and kwargs.get("Stime", "") == ""
+            and kwargs.get("Etime", "") == ""
+            and kwargs.get("LastCount", 20) == 20
+        ):
+            # The real SDK exposes the documented defaults through a 4-argument
+            # overload; sending empty optional arguments is accepted by Python
+            # but rejected by the broker.
+            query_args = tuple(
+                kwargs[name]
+                for name in ("Account", "MarketType", "StkCode", "SelectType")
+            )
+            query_kwargs = {}
         try:
-            accepted = method(*args, **kwargs) if args else method(**kwargs)
+            accepted = (
+                method(*query_args, **query_kwargs)
+                if query_args
+                else method(**query_kwargs)
+            )
         except TypeError:
             # Some pythonnet bindings do not accept keyword arguments.  If the
             # caller supplied only kwargs, retry positionally in declaration
             # order (the service layer preserves the documented order).
-            if not args and kwargs:
-                accepted = method(*kwargs.values())
+            if not query_args and query_kwargs:
+                accepted = method(*query_kwargs.values())
             else:
                 raise
         except Exception as exc:

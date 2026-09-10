@@ -218,6 +218,35 @@ def test_on_response_writes_to_event_queue() -> None:
     assert event.obj_value is not None
 
 
+class FakeSubscriptionTrader(FakeTrader):
+    def __init__(self) -> None:
+        super().__init__()
+        self.subscription_calls: list[tuple] = []
+
+    def SubscribeWatchlist(self, account, payload, language):
+        self.subscription_calls.append((account, payload, language))
+        # The real SDK method is System.Void; success is signaled asynchronously.
+
+
+class FakeTickResult:
+    MarketNo = "TWSE"
+    StockCode = "00635U"
+    StickDetailList: ClassVar[list] = []
+
+
+class FakeTickQueryTrader(FakeTrader):
+    def __init__(self) -> None:
+        super().__init__()
+        self.tick_calls: list[tuple] = []
+        self.on_response = None
+
+    def GetStkTickDetail(self, account, market_type, stk_code, select_type):
+        self.tick_calls.append((account, market_type, stk_code, select_type))
+        if self.on_response is not None:
+            self.on_response(1, 500012, "GetStkTickDetail", None, FakeTickResult())
+        return True
+
+
 class FakeStoreResult:
     StkStoreList: ClassVar[list] = []
     OVStkStoreList: ClassVar[list] = []
@@ -256,6 +285,40 @@ def test_query_calls_trader_and_waits_for_matching_response() -> None:
     # The unrelated event remains available to WebSocket consumers.
     event = adapter2.event_queue.get(timeout=0.1)
     assert event.str_index == "GetBankBalance"
+
+
+def test_query_uses_official_default_tick_overload() -> None:
+    trader = FakeTickQueryTrader()
+    adapter = YuantaAdapter(trader=trader)
+    trader.on_response = adapter._on_response
+    adapter.open()
+
+    result = adapter.query(
+        "GetStkTickDetail",
+        Account="S98875005091",
+        MarketType="TWSE",
+        StkCode="00635U",
+        SelectType=1,
+        Stime="",
+        Etime="",
+        LastCount=20,
+        timeout=1,
+    )
+
+    assert result == {"market_no": "TWSE", "stock_code": "00635U", "stick_detail_list": []}
+    assert trader.tick_calls == [("S98875005091", "TWSE", "00635U", 1)]
+
+
+def test_void_subscription_call_is_successful() -> None:
+    trader = FakeSubscriptionTrader()
+    adapter = YuantaAdapter(trader=trader)
+
+    assert adapter.subscribe(
+        "SubscribeWatchlist",
+        "S98875005091",
+        [{"market_type": "TWSE", "stk_code": "00635U", "index_flag": 7}],
+    ) is True
+    assert len(trader.subscription_calls) == 1
 
 
 class FakePositionalOnlyQueryTrader(FakeTrader):

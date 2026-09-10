@@ -16,6 +16,19 @@
 
 ---
 
+## [0.1.7] - 2026-09-10
+
+### Fixed
+
+- 兼容真实 SDK 的 `GetStkTickDetail` 四参数默认 overload，避免显式传空的可选参数被券商拒绝。
+- 兼容真实 SDK 返回 `System.Void` 的股票订阅方法，以异步 `OnResponse` 作为后续状态来源。
+- 增加通用 SDK 回报的脱敏诊断日志，记录 `int_mark`、`dw_index`、`str_index`、对象类型和响应关联信息。
+
+### Verification
+
+- 本地自动化测试：341 passed；Ruff、锁文件检查和 diff 检查通过。
+- 远程 PROD 官方四参数 `GetStkTickDetail` 已成功返回 20 条分时数据。
+
 ## [0.1.6] - 2026-09-10
 
 ### Fixed
