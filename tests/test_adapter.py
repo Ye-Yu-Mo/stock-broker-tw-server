@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sys
 import threading
 import time
@@ -597,6 +598,16 @@ def test_stock_order_payload_coerces_ap_code_and_identify_to_int(monkeypatch) ->
     assert isinstance(payload[0].APCode, int)
     assert payload[0].Identify == 7
     assert isinstance(payload[0].Identify, int)
+
+
+def test_stock_order_payload_nudges_decimal_price_for_sdk(monkeypatch) -> None:
+    install_fake_stock_order_modules(monkeypatch)
+
+    payload = YuantaAdapter._build_stock_order_payload(
+        {"price": 45.48, "identify": 1, "stk_code": "00635U"}
+    )
+
+    assert payload[0].Price == math.nextafter(45.48, math.inf)
 
 
 def test_stock_order_payload_does_not_fallback_on_field_type_error(monkeypatch) -> None:

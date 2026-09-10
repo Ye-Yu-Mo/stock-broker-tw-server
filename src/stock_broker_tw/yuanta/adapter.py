@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import math
 import threading
 import time
 from pathlib import Path
@@ -624,6 +625,13 @@ class YuantaAdapter:
                         raise YuantaAdapterError(
                             f"{attr} must be an integer"
                         ) from exc
+                elif attr == "Price" and isinstance(value, (int, float)) and not isinstance(value, bool):
+                    # The SDK truncates doubles to four decimals internally;
+                    # nudge decimal prices above the binary float boundary so
+                    # e.g. 45.48 is not sent as 45.4799.
+                    numeric = float(value)
+                    if math.isfinite(numeric) and numeric > 0:
+                        value = math.nextafter(numeric, math.inf)
                 try:
                     setattr(so, attr, value)
                 except (TypeError, ValueError, OverflowError) as exc:

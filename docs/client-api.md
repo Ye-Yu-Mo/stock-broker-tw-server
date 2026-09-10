@@ -71,7 +71,7 @@ GET /health
   "event_queue_size": 0,
   "audit_enabled": true,
   "audit_file": null,
-  "version": "0.1.5",
+  "version": "0.1.6",
   "environment": "UAT",
   "panic": false,
   "circuit_breaker_open": false,
