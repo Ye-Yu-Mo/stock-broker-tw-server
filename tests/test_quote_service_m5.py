@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,18 @@ class FakeAdapter:
     def unsubscribe(self, function_name: str, account: str, symbols: list):
         self.unsubscribe_calls.append((function_name, account, symbols))
         return True
+
+
+class BlockingAdapter(FakeAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def subscribe(self, function_name: str, account: str, symbols: list):
+        self.entered.set()
+        self.release.wait(timeout=2)
+        return super().subscribe(function_name, account, symbols)
 
 
 def make_service(
@@ -159,6 +172,27 @@ def test_invalid_type_raises(tmp_path: Path) -> None:
     service, _ = make_service(tmp_path)
     with pytest.raises(QuoteServiceError):
         run(service.subscribe({"type": "bad", "symbols": ["2330"]}))
+
+
+def test_concurrent_subscribe_is_serialized_and_sync_adapter_does_not_block_loop(tmp_path: Path) -> None:
+    adapter = BlockingAdapter()
+    service, _ = make_service(tmp_path, adapter=adapter)
+
+    async def scenario() -> None:
+        first = asyncio.create_task(
+            service.subscribe({"type": "five_tick", "symbols": ["2330"]})
+        )
+        await asyncio.to_thread(adapter.entered.wait, 1)
+        second = asyncio.create_task(
+            service.subscribe({"type": "five_tick", "symbols": ["2330"]})
+        )
+        await asyncio.sleep(0.01)
+        assert len(adapter.subscribe_calls) == 0
+        adapter.release.set()
+        await asyncio.gather(first, second)
+
+    run(scenario())
+    assert len(adapter.subscribe_calls) == 1
 
 
 def test_quote_failure_does_not_open_trade_circuit(tmp_path: Path) -> None:

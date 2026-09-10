@@ -103,6 +103,37 @@ def test_get_unfinished_orders(tmp_path: Path) -> None:
     assert [item["order_no"] for item in unfinished] == ["H00001"]
 
 
+def test_stock_order_update_merges_concurrent_transition_history(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.db")
+    store.save_stock_order(
+        client_order_id="C001",
+        request={"client_order_id": "C001", "action": "new"},
+        status="PENDING",
+        data={"request_marker": "kept"},
+    )
+    store.update_stock_order(
+        "C001",
+        status="SUBMITTED",
+        data={"response": {"stage": "submitted"}, "transitions": [
+            {"from": "PENDING", "to": "SUBMITTED", "at": "2026-01-01T00:00:00+00:00"}
+        ]},
+    )
+    store.update_stock_order(
+        "C001",
+        status="ACCEPTED",
+        data={"result": {"stage": "accepted"}, "transitions": [
+            {"from": "PENDING", "to": "SUBMITTED", "at": "2026-01-01T00:00:00+00:00"},
+            {"from": "SUBMITTED", "to": "ACCEPTED", "at": "2026-01-01T00:00:01+00:00"},
+        ]},
+    )
+
+    row = store.get_stock_order("C001")
+    assert row["data"]["request_marker"] == "kept"
+    assert row["data"]["response"] == {"stage": "submitted"}
+    assert row["data"]["result"] == {"stage": "accepted"}
+    assert [item["to"] for item in row["data"]["transitions"]] == ["SUBMITTED", "ACCEPTED"]
+
+
 def test_in_memory_store_keeps_data_across_calls() -> None:
     store = StateStore(":memory:")
     store.save_snapshot("positions", {"stk_store_list": []}, account="S")

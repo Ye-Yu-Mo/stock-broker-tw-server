@@ -9,6 +9,7 @@ and :class:`AsyncEventConsumer`).
 from __future__ import annotations
 
 import asyncio
+import logging
 import queue
 import threading
 from collections.abc import Awaitable, Callable
@@ -16,6 +17,8 @@ from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from stock_broker_tw.metrics import metrics
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
@@ -221,9 +224,18 @@ class AsyncEventConsumer:
             item = await self._event_queue.async_get()
             if item is _SENTINEL:
                 break
-            result = self._handler(item)
-            if isinstance(result, Awaitable):
-                await result
+            try:
+                result = self._handler(item)
+                if isinstance(result, Awaitable):
+                    await result
+            except Exception:
+                # One malformed or stale broker event must not stop all later
+                # reports and quote updates from reaching their consumers.
+                logger.exception(
+                    "event handler failed: str_index=%s dw_index=%s",
+                    item.str_index,
+                    item.dw_index,
+                )
 
 
 # Common aliases.

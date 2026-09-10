@@ -8,6 +8,7 @@ FunctionID.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from typing import Any
 
@@ -64,8 +65,17 @@ class QuoteService:
             file_path=settings.audit.file,
         )
         self.circuit_breaker = circuit_breaker
+        self._subscription_lock = asyncio.Lock()
 
     # -- public API ---------------------------------------------------------
+
+    async def subscribe(
+        self,
+        request: SubscribeRequest | dict[str, Any],
+        request_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        async with self._subscription_lock:
+            return await self._subscribe(request, request_id=request_id)
 
     def _ensure_writable(self) -> None:
         if bool(getattr(getattr(self.settings, "server", None), "read_only", False)):
@@ -87,7 +97,7 @@ class QuoteService:
             )
         return resolved
 
-    async def subscribe(
+    async def _subscribe(
         self,
         request: SubscribeRequest | dict[str, Any],
         request_id: str | None = None,
@@ -198,6 +208,14 @@ class QuoteService:
         return self._serialize_rows(self.store.list_quote_subscriptions(account=account))
 
     async def unsubscribe(
+        self,
+        request: SubscribeRequest | dict[str, Any],
+        request_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        async with self._subscription_lock:
+            return await self._unsubscribe(request, request_id=request_id)
+
+    async def _unsubscribe(
         self,
         request: SubscribeRequest | dict[str, Any],
         request_id: str | None = None,
@@ -315,23 +333,52 @@ class QuoteService:
 
     async def _call_adapter(self, operation: str, function_name: str, account: str, payload: list[dict[str, Any]]) -> None:
         method = getattr(self.adapter, operation, None)
-        if not callable(method):
+        if callable(method):
+            args: tuple[Any, ...] = (function_name, account, payload)
+        else:
             # Compatibility with fakes that expose the Yuanta method directly.
             method = getattr(self.adapter, function_name, None)
             if not callable(method):
                 raise TypeError(f"adapter has no {operation}() or {function_name}()")
-            try:
-                call = method(account, payload)
-            except TypeError:
-                call = method(account, payload, 0)
-        else:
-            call = method(function_name, account, payload)
+            args = (account, payload)
 
-        if inspect.isawaitable(call):
-            result = await call
+        try:
+            parameters = inspect.signature(method).parameters.values()
+            positional = [
+                parameter
+                for parameter in parameters
+                if parameter.kind
+                in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}
+            ]
+            required = sum(parameter.default is inspect.Parameter.empty for parameter in positional)
+            accepts_varargs = any(
+                parameter.kind == inspect.Parameter.VAR_POSITIONAL for parameter in parameters
+            )
+            if not accepts_varargs and len(args) < required:
+                args = (*args, 0)
+            signature_known = True
+        except (TypeError, ValueError):
+            signature_known = False
+
+        if signature_known:
+            call = (
+                await method(*args)
+                if inspect.iscoroutinefunction(method)
+                else await asyncio.to_thread(method, *args)
+            )
         else:
-            result = call
-        if result is False:
+            # pythonnet methods may not expose a signature. Preserve the
+            # historical two-argument-first fallback in that narrow case.
+            def invoke() -> Any:
+                try:
+                    return method(*args)
+                except TypeError:
+                    return method(*args, 0)
+
+            call = await asyncio.to_thread(invoke)
+        if inspect.isawaitable(call):
+            call = await call
+        if call is False:
             raise RuntimeError(f"{operation} {function_name} was rejected")
 
     @staticmethod

@@ -8,6 +8,7 @@ persists the update, and broadcasts both the processed report and the
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from stock_broker_tw.engine.state import (
@@ -19,6 +20,8 @@ from stock_broker_tw.engine.state import (
 from stock_broker_tw.state.store import StateStore
 from stock_broker_tw.yuanta.events import YuantaEvent
 from stock_broker_tw.yuanta.serializer import to_dict
+
+logger = logging.getLogger(__name__)
 
 _REPORT_TYPES = {"RR_RealReport": "real_report", "RR_RealReportMerge": "real_report_merge"}
 _M3_STATUS = {
@@ -202,16 +205,32 @@ class ReportHandler:
                     other["client_order_id"] != row["client_order_id"]
                     and other.get("order_no") == mapped_order_no
                 ):
-                    self.store.update_stock_order(
-                        other["client_order_id"],
-                        status=final_status,
-                        order_no=mapped_order_no,
-                        trade_date=other.get("trade_date") or row.get("trade_date"),
-                        data=data,
-                        request=other.get("request"),
-                        account=other.get("account"),
-                        action=other.get("action"),
-                    )
+                    try:
+                        self.store.update_stock_order(
+                            other["client_order_id"],
+                            status=final_status,
+                            order_no=mapped_order_no,
+                            trade_date=other.get("trade_date") or row.get("trade_date"),
+                            data=data,
+                            request=other.get("request"),
+                            account=other.get("account"),
+                            action=other.get("action"),
+                        )
+                    except InvalidOrderStateTransition:
+                        # A cancel/replace row may already be final even when
+                        # the original order receives a later broker report.
+                        logger.info(
+                            "skip linked order status update: client_order_id=%s status=%s",
+                            other["client_order_id"],
+                            other.get("status"),
+                        )
+                    except Exception:
+                        # A single stale/locked linked row must not discard the
+                        # report for the primary order or stop the event consumer.
+                        logger.exception(
+                            "linked order update failed: client_order_id=%s",
+                            other["client_order_id"],
+                        )
 
         updated = self.store.get_stock_order(row["client_order_id"]) or {}
         if self.notifier is not None:

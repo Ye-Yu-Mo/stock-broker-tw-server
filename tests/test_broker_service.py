@@ -247,6 +247,35 @@ def test_same_client_order_id_with_different_action_is_conflict(tmp_path: Path) 
     assert len(adapter.calls) == 1
 
 
+def test_claim_conflict_with_different_parameters_is_not_reused(tmp_path: Path) -> None:
+    service, adapter, store, _ = make_env(tmp_path)
+    first = StockOrderRequest.from_dict(
+        {
+            "client_order_id": "RACE001",
+            "account": "S98875005091",
+            "stk_code": "2330",
+            "side": "B",
+            "price": 500.0,
+            "quantity": 10,
+        }
+    )
+    store.claim_stock_order(
+        first.client_order_id,
+        first.to_dict(),
+        account=first.account,
+        action="new",
+        mock=False,
+        execution_id="first-execution",
+    )
+    second = StockOrderRequest.from_dict({**first.to_dict(), "price": 501.0})
+
+    with pytest.raises(BrokerServiceError) as exc_info:
+        service._claim_pending(second, execution_id="second-execution")
+
+    assert exc_info.value.code == "IDEMPOTENCY_CONFLICT"
+    assert adapter.calls == []
+
+
 def test_risk_rejected_order_never_calls_adapter(tmp_path: Path) -> None:
     risk = RiskConfig(max_order_qty=1)
     service, adapter, _store, _ = make_env(tmp_path, risk=risk)

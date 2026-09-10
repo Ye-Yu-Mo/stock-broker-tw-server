@@ -133,6 +133,28 @@ def test_async_owner_does_not_leave_sync_backlog() -> None:
     asyncio.run(scenario())
 
 
+def test_async_event_consumer_continues_after_handler_error() -> None:
+    async def scenario() -> None:
+        eq = EventQueue()
+        received: list[str] = []
+
+        async def handler(event: YuantaEvent) -> None:
+            received.append(event.str_index)
+            if event.str_index == "bad":
+                raise RuntimeError("malformed event")
+
+        consumer = eq.consume(handler)
+        await consumer.start()
+        for name in ("bad", "after"):
+            eq.put(make_event(name))
+        await asyncio.sleep(0.02)
+        await consumer.stop()
+
+        assert received == ["bad", "after"]
+
+    asyncio.run(scenario())
+
+
 def test_async_owner_stop_does_not_poison_sync_queue() -> None:
     async def scenario() -> None:
         eq = EventQueue()

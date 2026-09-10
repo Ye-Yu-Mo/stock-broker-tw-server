@@ -850,6 +850,12 @@ class BrokerService:
             and row.get("action") == (req.action.value if isinstance(req.action, OrderAction) else str(req.action))
             and self._row_is_mock(row) == req.mock
         ):
+            if not self._request_matches(row, req):
+                raise BrokerServiceError(
+                    "client_order_id already used with different order parameters",
+                    code="IDEMPOTENCY_CONFLICT",
+                    status_code=409,
+                )
             return row
         raise BrokerServiceError(
             "client_order_id already used for a different action or mode",

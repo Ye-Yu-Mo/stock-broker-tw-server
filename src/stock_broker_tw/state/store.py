@@ -116,6 +116,33 @@ def _json_loads(value: str) -> Any:
         return value
 
 
+def _merge_order_data(current: Any, incoming: Any) -> dict[str, Any] | None:
+    """Merge an order update without discarding fields from a newer writer."""
+    if incoming is None:
+        return None
+    current_data = dict(current) if isinstance(current, dict) else {}
+    incoming_data = dict(incoming) if isinstance(incoming, dict) else {}
+    merged = {**current_data, **incoming_data}
+
+    current_transitions = current_data.get("transitions")
+    incoming_transitions = incoming_data.get("transitions")
+    if isinstance(current_transitions, list) or isinstance(incoming_transitions, list):
+        transitions: list[Any] = []
+        seen: set[str] = set()
+        for item in [
+            *(current_transitions if isinstance(current_transitions, list) else []),
+            *(incoming_transitions if isinstance(incoming_transitions, list) else []),
+        ]:
+            marker = _json_dumps(item)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            transitions.append(item)
+        transitions.sort(key=lambda item: str(item.get("at", item.get("timestamp", ""))) if isinstance(item, dict) else "")
+        merged["transitions"] = transitions
+    return merged
+
+
 def _validate_order_transition(
     client_order_id: str,
     current_status: str | None,
@@ -171,8 +198,9 @@ class StateStore:
     def _connect(self) -> sqlite3.Connection:
         if self._memory_conn is not None:
             return self._memory_conn
-        conn = sqlite3.connect(str(self.db_path))
+        conn = sqlite3.connect(str(self.db_path), timeout=5.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 5000")
         return conn
 
     def _init_schema(self) -> None:
@@ -699,19 +727,23 @@ class StateStore:
         a status that is not reachable from the current state.  Idempotent
         writes with the same status are still allowed.
         """
-        current = self.get_stock_order(client_order_id)
-        if current is not None:
-            _validate_order_transition(
-                client_order_id,
-                current.get("status"),
-                status,
-            )
         request = request or {"client_order_id": client_order_id}
         request_json = _json_dumps(request)
         data_json = _json_dumps(data or {})
         trade_date = _stringify_date(trade_date) or trade_date
         now = _now()
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT status FROM stock_orders WHERE client_order_id = ?",
+                (client_order_id,),
+            ).fetchone()
+            if current is not None:
+                _validate_order_transition(
+                    client_order_id,
+                    current["status"],
+                    status,
+                )
             conn.execute(
                 """
                 INSERT INTO stock_orders (
@@ -1096,7 +1128,7 @@ class StateStore:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             current = conn.execute(
-                "SELECT status FROM stock_orders WHERE client_order_id = ?",
+                "SELECT status, data FROM stock_orders WHERE client_order_id = ?",
                 (client_order_id,),
             ).fetchone()
             if current is None:
@@ -1106,6 +1138,7 @@ class StateStore:
                 current["status"],
                 status,
             )
+            merged_data = _merge_order_data(_json_loads(current["data"]), data)
             conn.execute(
                 """
                 UPDATE stock_orders SET
@@ -1126,7 +1159,7 @@ class StateStore:
                     order_no,
                     trade_date,
                     _json_dumps(request) if request is not None else None,
-                    _json_dumps(data) if data is not None else None,
+                    _json_dumps(merged_data) if merged_data is not None else None,
                     _now(),
                     client_order_id,
                 ),

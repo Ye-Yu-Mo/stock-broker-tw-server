@@ -239,6 +239,49 @@ def test_report_status_zero_means_accepted(tmp_path: Path) -> None:
     assert store.get_stock_order("ZERO001")["status"] == "ACCEPTED"
 
 
+def test_final_linked_replace_does_not_break_primary_report(tmp_path: Path) -> None:
+    store, _broadcaster, handler = make_env(tmp_path)
+    _save_order(store, "ORIGINAL001")
+    store.save_stock_order(
+        client_order_id="CANCEL001",
+        request={
+            "client_order_id": "CANCEL001",
+            "action": "cancel",
+            "account": "S98875005091",
+            "stk_code": "2330",
+            "side": "B",
+            "quantity": 1000,
+        },
+        status="CANCELLED",
+        account="S98875005091",
+        action="cancel",
+        order_no="H00001",
+        trade_date="2026/08/28",
+    )
+
+    run(
+        handler.handle_event(
+            YuantaEvent(
+                2,
+                0,
+                "RR_RealReport",
+                None,
+                {
+                    "client_order_id": "ORIGINAL001",
+                    "order_no": "H00001",
+                    "basket_no": "ORIGINAL001",
+                    "order_status": 8,
+                    "ok_qty": 1000,
+                    "order_qty": 1000,
+                },
+            )
+        )
+    )
+
+    assert store.get_stock_order("ORIGINAL001")["status"] == "FILLED"
+    assert store.get_stock_order("CANCEL001")["status"] == "CANCELLED"
+
+
 def test_failed_replace_does_not_reject_original_order(tmp_path: Path) -> None:
     store, _broadcaster, handler = make_env(tmp_path)
     _save_order(store, "ORIGINAL001")

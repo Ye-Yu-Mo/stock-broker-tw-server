@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from time import perf_counter
@@ -133,28 +134,27 @@ def create_app(
         mock_quote_provider=mock_quote_provider,
     )
     report_handler = ReportHandler(state_store, broadcaster=ws_manager, notifier=notifier)
+    recovery_lock = asyncio.Lock()
+
+    async def run_recovery() -> dict[str, Any]:
+        async with recovery_lock:
+            return await run_startup_recovery(
+                state_store,
+                query_service,
+                adapter,
+                audit=audit,
+                notifier=notifier,
+            )
 
     async def recover_after_login() -> dict[str, Any]:
-        summary = await run_startup_recovery(
-            state_store,
-            query_service,
-            adapter,
-            audit=audit,
-            notifier=notifier,
-        )
+        summary = await run_recovery()
         app.state.last_recovery = summary
         return summary
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await ws_manager.start(adapter.event_queue, report_handler=report_handler)
-        last_recovery = await run_startup_recovery(
-            state_store,
-            query_service,
-            adapter,
-            audit=audit,
-            notifier=notifier,
-        )
+        last_recovery = await run_recovery()
         app.state.last_recovery = last_recovery
         yield
         try:
@@ -170,7 +170,7 @@ def create_app(
 
     app = FastAPI(
         title="stock-broker-tw-server",
-        version="0.1.7",
+        version="0.1.8",
         lifespan=lifespan,
     )
     session_service.on_login_success = recover_after_login
