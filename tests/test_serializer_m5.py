@@ -195,6 +195,63 @@ class FakeMarketType:
         return "TWSE"
 
 
+class FakeQueryWatchListRowWithEnum:
+    MarketNo = FakeMarketType()
+    StkCode = "2330"
+    StkName = "Test"
+    YstPrice = 500.0
+    OpenRefPrice = 500.0
+    UpStopPrice = 550.0
+    DownStopPrice = 450.0
+    YstVol = 100
+    ExtName = ""
+    Decimal = 2
+    CreditPercent = 60
+    LenBondPercent = 90
+    OpenPrice = 500.0
+    HighPrice = 510.0
+    LowPrice = 490.0
+    BuyPrice = 500.0
+    TotalOutVol = 10
+    SellPrice = 501.0
+    TotalInVol = 20
+    DealPrice = 500.5
+    TotalDealAmt = 50050
+    VolFlag = 1
+    Vol = 10
+    TotalVol = 100
+    FixedPriceVol = 0
+    ReserveVol = 0
+    SettlementPrice = 0.0
+    HiContractPrice = 0.0
+    LoContractPrice = 0.0
+    OrderBuyCount = 1
+    OrderBuyQty = 10
+    OrderSellCount = 1
+    OrderSellQty = 10
+    DealBuyCount = 1
+    DealSellCount = 1
+    Volatility = 0
+    Time = FakeTime()
+    TimeDiff = "0"
+    StkType2 = 0
+    ReserveVolDiff = 0
+    BelongCode = ""
+    IndustryName = ""
+    PrincipalPercent = 0.0
+    UpDownDay = 0
+    BidQty = 10
+    AskQty = 10
+    PriceTrends = 10
+    EstDealPrice = 0.0
+    EstDealVol = 0
+    EstDealVolFlag = 0
+
+
+class FakeQueryWatchListResultWithEnum:
+    QueryWatchList: ClassVar[list[FakeQueryWatchListRowWithEnum]] = [FakeQueryWatchListRowWithEnum()]
+
+
 class FakeStkInformationWithEnum(FakeStkInformation):
     MarketNo = FakeMarketType()
 
@@ -233,6 +290,12 @@ def test_to_dict_dispatches_query_watch_list_result() -> None:
     data = to_dict(FakeQueryWatchListResult())
     assert data == query_watch_list_result_to_dict(FakeQueryWatchListResult())
     assert data["query_watch_list"][0]["stk_code"] == "2330"
+
+
+def test_query_watch_list_market_no_enum_is_json_safe() -> None:
+    data = to_dict(FakeQueryWatchListResultWithEnum())
+    assert data["query_watch_list"][0]["market_no"] == "TWSE"
+    json.dumps(data)
 
 
 def test_five_tick_a_result_to_dict() -> None:

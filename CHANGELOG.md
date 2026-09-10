@@ -16,6 +16,16 @@
 
 ---
 
+## [0.1.5] - 2026-09-10
+
+### Fixed
+
+- 修复 `QueryWatchList` 的 `MarketNo` enum 未转换为 JSON 标量，导致真实行情快照 HTTP 接口返回 500 的问题。
+
+### Verification
+
+- 远程 PROD 行情接口回归测试和本地自动化测试通过。
+
 ## [0.1.4] - 2026-09-10
 
 ### Fixed

@@ -1,2 +1,2 @@
 """stock_broker_tw_server package."""
-__version__ = "0.1.4"
+__version__ = "0.1.5"

@@ -1032,7 +1032,7 @@ def k_line_result_to_dict(obj: Any) -> dict[str, Any]:
 def query_watch_list_to_dict(obj: Any) -> dict[str, Any]:
     """Serialize a ``QueryWatchList`` snapshot row."""
     return {
-        "market_no": _get_attr(obj, "MarketNo"),
+        "market_no": _json_scalar(_get_attr(obj, "MarketNo")),
         "stk_code": _get_attr(obj, "StkCode"),
         "stk_name": _get_attr(obj, "StkName"),
         "yst_price": _get_attr(obj, "YstPrice"),
