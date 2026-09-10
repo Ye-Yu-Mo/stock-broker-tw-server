@@ -449,8 +449,6 @@ class QueryService:
                     timeout=self.settings.query.timeout,
                 )
         except TimeoutError as exc:
-            if self.circuit_breaker is not None:
-                self.circuit_breaker.record_failure(exc)
             self.audit.record(
                 "query.timeout",
                 result="error",
@@ -468,8 +466,6 @@ class QueryService:
         except QueryError:
             raise
         except Exception as exc:
-            if self.circuit_breaker is not None:
-                self.circuit_breaker.record_failure(exc)
             self.audit.record(
                 "query.error",
                 result="error",
@@ -492,8 +488,6 @@ class QueryService:
             account=params.get("Account"),
             function=function_name,
         )
-        if self.circuit_breaker is not None:
-            self.circuit_breaker.record_success()
         return result
 
     @staticmethod

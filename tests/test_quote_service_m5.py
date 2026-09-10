@@ -9,6 +9,7 @@ import pytest
 
 from stock_broker_tw.broker.quote import QuoteType, SubscribeRequest
 from stock_broker_tw.config import AccountConfig, QuoteConfig, Settings, StateConfig
+from stock_broker_tw.risk.circuit_breaker import CircuitBreaker
 from stock_broker_tw.risk.rate_limit import RateLimiter
 from stock_broker_tw.service.quote import QuoteService, QuoteServiceError
 from stock_broker_tw.state.store import StateStore
@@ -158,3 +159,19 @@ def test_invalid_type_raises(tmp_path: Path) -> None:
     service, _ = make_service(tmp_path)
     with pytest.raises(QuoteServiceError):
         run(service.subscribe({"type": "bad", "symbols": ["2330"]}))
+
+
+def test_quote_failure_does_not_open_trade_circuit(tmp_path: Path) -> None:
+    service, adapter = make_service(tmp_path)
+    breaker = CircuitBreaker(failure_threshold=1)
+    service.circuit_breaker = breaker
+
+    def fail_subscribe(*args, **kwargs):
+        raise RuntimeError("quote host unavailable")
+
+    adapter.subscribe = fail_subscribe
+    with pytest.raises(QuoteServiceError):
+        run(service.subscribe({"type": "five_tick", "symbols": ["2330"]}))
+
+    assert breaker.is_open is False
+    assert breaker.consecutive_failures == 0

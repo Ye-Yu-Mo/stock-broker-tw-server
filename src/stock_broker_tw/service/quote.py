@@ -8,7 +8,7 @@ FunctionID.
 
 from __future__ import annotations
 
-import asyncio
+import inspect
 from typing import Any
 
 from stock_broker_tw.audit import AuditLogger
@@ -314,32 +314,25 @@ class QuoteService:
         return rows
 
     async def _call_adapter(self, operation: str, function_name: str, account: str, payload: list[dict[str, Any]]) -> None:
-        try:
-            method = getattr(self.adapter, operation, None)
+        method = getattr(self.adapter, operation, None)
+        if not callable(method):
+            # Compatibility with fakes that expose the Yuanta method directly.
+            method = getattr(self.adapter, function_name, None)
             if not callable(method):
-                # Compatibility with fakes that expose the Yuanta method directly.
-                method = getattr(self.adapter, function_name, None)
-                if not callable(method):
-                    raise TypeError(f"adapter has no {operation}() or {function_name}()")
-                try:
-                    call = method(account, payload)
-                except TypeError:
-                    call = method(account, payload, 0)
-            else:
-                call = method(function_name, account, payload)
+                raise TypeError(f"adapter has no {operation}() or {function_name}()")
+            try:
+                call = method(account, payload)
+            except TypeError:
+                call = method(account, payload, 0)
+        else:
+            call = method(function_name, account, payload)
 
-            if asyncio.iscoroutine(call) or hasattr(call, "__await__"):
-                result = await call
-            else:
-                result = call
-            if result is False:
-                raise RuntimeError(f"{operation} {function_name} was rejected")
-        except Exception as exc:
-            if self.circuit_breaker is not None:
-                self.circuit_breaker.record_failure(exc)
-            raise
-        if self.circuit_breaker is not None:
-            self.circuit_breaker.record_success()
+        if inspect.isawaitable(call):
+            result = await call
+        else:
+            result = call
+        if result is False:
+            raise RuntimeError(f"{operation} {function_name} was rejected")
 
     @staticmethod
     def _serialize_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

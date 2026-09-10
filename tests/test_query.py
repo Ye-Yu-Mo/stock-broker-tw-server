@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from stock_broker_tw.config import AccountConfig, QueryConfig, Settings, StateConfig
+from stock_broker_tw.risk.circuit_breaker import CircuitBreaker
 from stock_broker_tw.risk.rate_limit import RateLimiter
 from stock_broker_tw.service.query import QueryError, QueryService
 from stock_broker_tw.state.store import StateStore
@@ -129,3 +130,17 @@ def test_query_passes_request_id_to_adapter(tmp_path: Path) -> None:
         "GetStoreSummary",
         {"Account": "S98875005091", "request_id": "REQ-1"},
     )
+
+
+def test_query_failure_does_not_open_trade_circuit(tmp_path: Path) -> None:
+    adapter = FakeAdapter()
+    adapter.raise_timeout = True
+    service, _ = make_service(tmp_path, adapter)
+    breaker = CircuitBreaker(failure_threshold=1)
+    service.circuit_breaker = breaker
+
+    with pytest.raises(QueryError):
+        run(service.positions())
+
+    assert breaker.is_open is False
+    assert breaker.consecutive_failures == 0
