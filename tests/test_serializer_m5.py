@@ -9,6 +9,7 @@ from stock_broker_tw.yuanta.serializer import (
     five_tick_a_result_to_dict,
     k_line_result_to_dict,
     market_info_result_to_dict,
+    query_watch_list_result_to_dict,
     stick_detail_result_to_dict,
     stk_classify_price_result_to_dict,
     stk_information_result_to_dict,
@@ -33,6 +34,10 @@ class FakeWatchListResult:
     StkCode = "2330"
     IndexFlag = 7
     Value = 500.0
+
+
+class FakeQueryWatchListResult:
+    QueryWatchList: ClassVar[list[FakeWatchListResult]] = [FakeWatchListResult()]
 
 
 class FakeWatchListAllResult:
@@ -222,6 +227,12 @@ def test_watch_list_all_result_to_dict() -> None:
     result.IndexFlag_22 = FakeFlag22()
     data = watch_list_all_result_to_dict(result)
     assert data["index_flag_22"] == {"buy_vol": 10, "sell_vol": 20}
+
+
+def test_to_dict_dispatches_query_watch_list_result() -> None:
+    data = to_dict(FakeQueryWatchListResult())
+    assert data == query_watch_list_result_to_dict(FakeQueryWatchListResult())
+    assert data["query_watch_list"][0]["stk_code"] == "2330"
 
 
 def test_five_tick_a_result_to_dict() -> None:

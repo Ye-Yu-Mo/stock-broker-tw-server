@@ -174,6 +174,10 @@ def to_dict(obj: Any) -> Any:
         return order_trade_report_result_to_dict(obj)
 
     # M5 quote subscription/query result wrappers.
+    # Check the query wrapper before the generic watch-list result: the type
+    # name ``QueryWatchListResult`` contains ``WatchListResult``.
+    if "querywatchlistresult" in name or hasattr(obj, "QueryWatchList"):
+        return query_watch_list_result_to_dict(obj)
     if "watchlistresult" in name or (
         hasattr(obj, "Key") and hasattr(obj, "IndexFlag") and hasattr(obj, "StkCode") and hasattr(obj, "Value")
     ):

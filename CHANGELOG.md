@@ -16,6 +16,16 @@
 
 ---
 
+## [0.1.4] - 2026-09-10
+
+### Fixed
+
+- 修复 `QueryWatchListResult` 被通用 `WatchListResult` 序列化分支提前匹配，导致真实 `GetWatchListAll` 报价字段全部为空的问题。
+
+### Verification
+
+- 远程 PROD `GetWatchListAll` 已确认返回真实 `QueryWatchListResult`；自动化测试、Ruff 和锁文件检查通过。
+
 ## [0.1.3] - 2026-09-09
 
 ### Added
