@@ -117,6 +117,37 @@ def to_list(obj: Any) -> list[Any]:
     return [to_dict(item) for item in items]
 
 
+def _iter_raw_items(obj: Any) -> list[Any]:
+    """Read a .NET collection without recursively serializing its items."""
+    if obj is None:
+        return []
+    if isinstance(obj, (list, tuple)):
+        return list(obj)
+    if hasattr(obj, "Count") and hasattr(obj, "__getitem__"):
+        try:
+            return [obj[i] for i in range(int(obj.Count))]
+        except Exception:
+            pass
+    try:
+        return list(obj)
+    except TypeError:
+        return [obj]
+
+
+def _quote_to_dict(obj: Any) -> dict[str, Any]:
+    """Serialize the small Quote shape returned by GetQuoteList."""
+    if isinstance(obj, dict):
+        market_type = obj.get("market_type", obj.get("MarketType"))
+        stock_code = obj.get("stock_code", obj.get("StockCode"))
+    else:
+        market_type = _get_attr(obj, "MarketType")
+        stock_code = _get_attr(obj, "StockCode")
+    return {
+        "market_type": _json_scalar(market_type),
+        "stock_code": str(stock_code) if stock_code is not None else None,
+    }
+
+
 def to_dict(obj: Any) -> Any:
     """Convert a Yuanta .NET object (or Python stand-in) to plain Python data."""
     if obj is None:
@@ -798,10 +829,10 @@ def watch_list_result_to_dict(obj: Any) -> dict[str, Any]:
     """Serialize a ``WatchListResult`` subscription event."""
     return {
         "key": _get_attr(obj, "Key"),
-        "market_type": _get_attr(obj, "MarketType"),
+        "market_type": _json_scalar(_get_attr(obj, "MarketType")),
         "stk_code": _get_attr(obj, "StkCode"),
-        "index_flag": _get_attr(obj, "IndexFlag"),
-        "value": _get_attr(obj, "Value"),
+        "index_flag": _json_scalar(_get_attr(obj, "IndexFlag")),
+        "value": to_dict(_get_attr(obj, "Value")),
     }
 
 
@@ -829,11 +860,11 @@ def watch_list_all_result_to_dict(obj: Any) -> dict[str, Any]:
     """Serialize a ``WatchListAllResult`` subscription event."""
     result = {
         "key": _get_attr(obj, "Key"),
-        "market_type": _get_attr(obj, "MarketType"),
+        "market_type": _json_scalar(_get_attr(obj, "MarketType")),
         "stk_code": _get_attr(obj, "StkCode"),
         "seq_no": _get_attr(obj, "SeqNo"),
-        "index_flag": _get_attr(obj, "IndexFlag"),
-        "value": _get_attr(obj, "Value"),
+        "index_flag": _json_scalar(_get_attr(obj, "IndexFlag")),
+        "value": to_dict(_get_attr(obj, "Value")),
     }
     if _get_attr(obj, "IndexFlag_22") is not None:
         result["index_flag_22"] = watch_list_all_flag_22_to_dict(_get_attr(obj, "IndexFlag_22"))
@@ -889,10 +920,10 @@ def five_tick_a_result_to_dict(obj: Any) -> dict[str, Any]:
     """Serialize a ``FiveTickAResult`` subscription event."""
     result = {
         "key": _get_attr(obj, "Key"),
-        "market_type": _get_attr(obj, "MarketType"),
+        "market_type": _json_scalar(_get_attr(obj, "MarketType")),
         "stk_code": _get_attr(obj, "StkCode"),
-        "index_flag": _get_attr(obj, "IndexFlag"),
-        "value": _get_attr(obj, "Value"),
+        "index_flag": _json_scalar(_get_attr(obj, "IndexFlag")),
+        "value": to_dict(_get_attr(obj, "Value")),
     }
     for flag_name in ("IndexFlag_20", "IndexFlag_21", "IndexFlag_42", "IndexFlag_43", "IndexFlag_50", "IndexFlag_51"):
         flag = _get_attr(obj, flag_name)
@@ -906,7 +937,7 @@ def stock_tick_result_to_dict(obj: Any) -> dict[str, Any]:
     """Serialize a ``StockTickResult`` subscription event."""
     return {
         "key": _get_attr(obj, "Key"),
-        "market_type": _get_attr(obj, "MarketType"),
+        "market_type": _json_scalar(_get_attr(obj, "MarketType")),
         "stk_code": _get_attr(obj, "StkCode"),
         "serial_no": _get_attr(obj, "SerialNo"),
         "time": to_dict(_get_attr(obj, "Time")),
@@ -923,7 +954,7 @@ def market_info_result_to_dict(obj: Any) -> dict[str, Any]:
     """Serialize a ``MarketInfoResult`` subscription event."""
     return {
         "key": _get_attr(obj, "Key"),
-        "market_type": _get_attr(obj, "MarketType"),
+        "market_type": _json_scalar(_get_attr(obj, "MarketType")),
         "stk_code": _get_attr(obj, "StkCode"),
         "deal_price": _get_attr(obj, "DealPrice"),
         "tick_vol": _get_attr(obj, "TickVol"),
@@ -936,9 +967,9 @@ def stock_other_info_result_to_dict(obj: Any) -> dict[str, Any]:
     """Serialize a ``StockOtherInfoResult`` subscription event."""
     return {
         "key": _get_attr(obj, "Key"),
-        "market_type": _get_attr(obj, "MarketType"),
+        "market_type": _json_scalar(_get_attr(obj, "MarketType")),
         "stk_code": _get_attr(obj, "StkCode"),
-        "index_flag": _get_attr(obj, "IndexFlag"),
+        "index_flag": _json_scalar(_get_attr(obj, "IndexFlag")),
         "trade_time": to_dict(_get_attr(obj, "TradeTime")),
     }
 
@@ -1094,7 +1125,7 @@ def sub_quote_list_result_to_dict(obj: Any) -> dict[str, Any]:
     """Serialize a ``SubQuoteListResult`` (GetQuoteList) result."""
     return {
         "account": _get_attr(obj, "Account"),
-        "quote_list": to_list(_get_attr(obj, "QuoteList")),
+        "quote_list": [_quote_to_dict(item) for item in _iter_raw_items(_get_attr(obj, "QuoteList"))],
     }
 
 

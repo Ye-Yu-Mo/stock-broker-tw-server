@@ -15,6 +15,7 @@ from stock_broker_tw.yuanta.serializer import (
     stk_information_result_to_dict,
     stock_other_info_result_to_dict,
     stock_tick_result_to_dict,
+    sub_quote_list_result_to_dict,
     to_dict,
     watch_list_all_result_to_dict,
     watch_list_result_to_dict,
@@ -195,6 +196,16 @@ class FakeMarketType:
         return "TWSE"
 
 
+class FakeQuote:
+    MarketType = FakeMarketType()
+    StockCode = "00635U"
+
+
+class FakeSubQuoteListResult:
+    Account = "S98875005091"
+    QuoteList: ClassVar[list[FakeQuote]] = [FakeQuote()]
+
+
 class FakeQueryWatchListRowWithEnum:
     MarketNo = FakeMarketType()
     StkCode = "2330"
@@ -343,13 +354,30 @@ def test_k_line_result_to_dict() -> None:
     assert data["k_line_list"][0]["close_price"] == 505.0
 
 
-def test_to_dict_dispatches_m5_types() -> None:
+def test_get_quote_list_serializes_dotnet_quote_enum() -> None:
+    data = sub_quote_list_result_to_dict(FakeSubQuoteListResult())
+    assert data == {
+        "account": "S98875005091",
+        "quote_list": [{"market_type": "TWSE", "stock_code": "00635U"}],
+    }
+    assert to_dict(FakeSubQuoteListResult()) == data
+    json.dumps(data)
+
+
     assert to_dict(FakeWatchListResult()) == watch_list_result_to_dict(FakeWatchListResult())
     assert to_dict(FakeStockTickResult()) == stock_tick_result_to_dict(FakeStockTickResult())
     assert to_dict(FakeKLineResult()) == k_line_result_to_dict(FakeKLineResult())
 
 
-def test_m5_market_no_enum_values_are_json_safe() -> None:
+def test_subscription_event_market_enum_is_json_safe() -> None:
+    class EventWithEnum(FakeWatchListResult):
+        MarketType = FakeMarketType()
+
+    data = watch_list_result_to_dict(EventWithEnum())
+    assert data["market_type"] == "TWSE"
+    json.dumps(data)
+
+
     cases = [
         (
             stk_information_result_to_dict(FakeStkInformationResultWithEnum()),

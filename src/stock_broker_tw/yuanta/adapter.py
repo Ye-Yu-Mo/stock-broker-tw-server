@@ -330,8 +330,14 @@ class YuantaAdapter:
         if (int_mark == 1 or str_index == "SendStockOrder") and str_index != "Login":
             try:
                 data = to_dict(obj_value)
-            except Exception:
-                logger.exception("failed to serialize %s response", str_index)
+            except Exception as exc:
+                error_message = str(exc)[:256]
+                logger.exception(
+                    "failed to serialize %s response: exception_type=%s error=%s",
+                    str_index,
+                    type(exc).__name__,
+                    error_message,
+                )
                 data = None
             if data is not None:
                 response_id = self._extract_response_request_id(data)

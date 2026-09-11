@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -11,6 +12,7 @@ from stock_broker_tw.yuanta.events import AsyncEventConsumer, EventQueue, Yuanta
 from stock_broker_tw.yuanta.serializer import to_dict
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 _REPORT_EVENT_TYPES = {"RR_RealReport", "RR_RealReportMerge"}
 _QUOTE_EVENT_TYPES = {
@@ -56,12 +58,23 @@ class ConnectionManager:
         self._task = None
 
     async def broadcast_event(self, event: YuantaEvent) -> None:
+        try:
+            data = to_dict(event.obj_value)
+            obj_handle = to_dict(event.obj_handle)
+        except Exception:
+            logger.exception(
+                "failed to serialize event: str_index=%s dw_index=%s",
+                event.str_index,
+                event.dw_index,
+            )
+            return
+
         payload = {
             "type": event.str_index,
             "int_mark": event.int_mark,
             "dw_index": event.dw_index,
-            "obj_handle": to_dict(event.obj_handle),
-            "data": to_dict(event.obj_value),
+            "obj_handle": obj_handle,
+            "data": data,
         }
         for websocket in list(self.active):
             try:
@@ -78,7 +91,7 @@ class ConnectionManager:
                     await handle
             except Exception:
                 # Report processing must not kill the shared event consumer.
-                pass
+                logger.exception("report event processing failed: str_index=%s", event.str_index)
 
         # M5: keep the raw subscription event and also emit a unified
         # ``quote.updated`` processed event for JSON-friendly clients.
@@ -89,12 +102,12 @@ class ConnectionManager:
                         "type": "quote.updated",
                         "source": event.str_index,
                         "event": event.str_index,
-                        "data": to_dict(event.obj_value),
+                        "data": data,
                     }
                 )
             except Exception:
                 # Quote event processing must not kill the shared consumer.
-                pass
+                logger.exception("quote event processing failed: str_index=%s", event.str_index)
 
     async def broadcast_json(self, payload: dict) -> None:
         """Send an arbitrary JSON object to all connected clients."""

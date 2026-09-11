@@ -136,18 +136,21 @@ def create_app(
     report_handler = ReportHandler(state_store, broadcaster=ws_manager, notifier=notifier)
     recovery_lock = asyncio.Lock()
 
-    async def run_recovery() -> dict[str, Any]:
+    async def run_recovery(restore_quotes: bool = False) -> dict[str, Any]:
         async with recovery_lock:
-            return await run_startup_recovery(
+            summary = await run_startup_recovery(
                 state_store,
                 query_service,
                 adapter,
                 audit=audit,
                 notifier=notifier,
             )
+            if restore_quotes:
+                summary["quote_subscriptions"] = await quote_service.restore_subscriptions()
+            return summary
 
     async def recover_after_login() -> dict[str, Any]:
-        summary = await run_recovery()
+        summary = await run_recovery(restore_quotes=True)
         app.state.last_recovery = summary
         return summary
 
@@ -170,7 +173,7 @@ def create_app(
 
     app = FastAPI(
         title="stock-broker-tw-server",
-        version="0.1.8",
+        version="0.1.9",
         lifespan=lifespan,
     )
     session_service.on_login_success = recover_after_login

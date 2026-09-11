@@ -195,6 +195,35 @@ def test_concurrent_subscribe_is_serialized_and_sync_adapter_does_not_block_loop
     assert len(adapter.subscribe_calls) == 1
 
 
+def test_restore_subscriptions_replays_local_rows_after_login(tmp_path: Path) -> None:
+    service, adapter = make_service(tmp_path)
+    service.store.save_quote_subscription(
+        "S98875005091", "watchlist", "00635U", "TWSE", index_flag=7
+    )
+    service.store.save_quote_subscription(
+        "S98875005091", "five_tick", "2330", "TWSE"
+    )
+
+    result = run(service.restore_subscriptions())
+
+    assert result["status"] == "ok"
+    assert result["requested"] == 2
+    assert result["restored"] == 2
+    assert result["failed"] == []
+    assert adapter.subscribe_calls == [
+        (
+            "SubscribeWatchlist",
+            "S98875005091",
+            [{"market_type": "TWSE", "stk_code": "00635U", "index_flag": 7}],
+        ),
+        (
+            "SubscribeFiveTickA",
+            "S98875005091",
+            [{"market_type": "TWSE", "stk_code": "2330"}],
+        ),
+    ]
+
+
 def test_quote_failure_does_not_open_trade_circuit(tmp_path: Path) -> None:
     service, adapter = make_service(tmp_path)
     breaker = CircuitBreaker(failure_threshold=1)

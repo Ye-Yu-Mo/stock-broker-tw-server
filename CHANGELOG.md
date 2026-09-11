@@ -16,6 +16,21 @@
 
 ---
 
+## [0.1.9] - 2026-09-11
+
+### Fixed
+
+- 为真实 `GetQuoteList` 的 `SubQuoteListResult.QuoteList` 增加明确的 Quote 序列化，兼容 .NET `MarketType` enum。
+- 将行情订阅事件中的 enum 和嵌套值转换为 JSON-safe 数据，避免 WebSocket `quote.updated` 广播失败。
+- WebSocket raw 事件和处理后行情事件复用同一次序列化，并隔离单个事件/客户端发送异常。
+- 登录成功后按本地 SQLite 订阅清单恢复券商端行情订阅，保留普通重复订阅的幂等行为。
+- 增强 SDK 序列化失败日志的异常类型和脱敏错误信息。
+
+### Verification
+
+- 本地自动化测试：348 passed；Ruff 和 diff 检查通过。
+- PROD v0.1.8 已确认快照、分时、分价量、K 线和个股资讯正常；GetQuoteList 序列化修复待 v0.1.9 部署后复验。
+
 ## [0.1.8] - 2026-09-10
 
 ### Fixed

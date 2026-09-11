@@ -300,6 +300,104 @@ class QuoteService:
         )
         return self._serialize_rows(self.store.list_quote_subscriptions(account=account))
 
+    async def restore_subscriptions(
+        self,
+        account: str | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Replay local subscriptions after a broker session is established."""
+        if bool(getattr(getattr(self.settings, "server", None), "read_only", False)):
+            return {"status": "skipped", "reason": "read_only", "restored": 0, "failed": []}
+
+        async with self._subscription_lock:
+            resolved_account = self._account(account)
+            rows = self.store.list_quote_subscriptions(account=resolved_account)
+            groups: dict[tuple[str, str, str, int | None], list[str]] = {}
+            for row in rows:
+                key = (
+                    str(row["type"]),
+                    str(row["market_type"]),
+                    str(row["account"]),
+                    row.get("index_flag"),
+                )
+                groups.setdefault(key, []).append(str(row["symbol"]))
+
+            restored = 0
+            failed: list[dict[str, Any]] = []
+            for (raw_type, market_type, row_account, index_flag), group_symbols in groups.items():
+                try:
+                    quote_type = QuoteType.from_value(raw_type)
+                except ValueError as exc:
+                    failed.append({"type": raw_type, "error": str(exc)})
+                    continue
+
+                symbols = list(dict.fromkeys(group_symbols))
+                for start in range(0, len(symbols), self.settings.quote.max_per_request):
+                    chunk = symbols[start : start + self.settings.quote.max_per_request]
+                    function_name = quote_type.subscribe_function
+                    if not self.rate_limiter.acquire(function_name, key=row_account):
+                        failed.append(
+                            {
+                                "type": raw_type,
+                                "market_type": market_type,
+                                "index_flag": index_flag,
+                                "symbols": chunk,
+                                "code": "RATE_LIMITED",
+                            }
+                        )
+                        continue
+                    request = SubscribeRequest(
+                        type=quote_type,
+                        symbols=chunk,
+                        account=row_account,
+                        market_type=market_type,
+                        index_flag=index_flag,
+                    )
+                    try:
+                        await self._call_adapter(
+                            "subscribe",
+                            function_name,
+                            row_account,
+                            self._build_payload(request, chunk),
+                        )
+                    except Exception as exc:
+                        self.audit.record(
+                            "quote.restore",
+                            result="error",
+                            request_id=request_id,
+                            account=row_account,
+                            function=function_name,
+                            symbols=chunk,
+                            error=str(exc),
+                        )
+                        failed.append(
+                            {
+                                "type": raw_type,
+                                "market_type": market_type,
+                                "index_flag": index_flag,
+                                "symbols": chunk,
+                                "code": "SUBSCRIBE_FAILED",
+                                "error": str(exc),
+                            }
+                        )
+                        continue
+                    restored += len(chunk)
+                    self.audit.record(
+                        "quote.restore",
+                        result="success",
+                        request_id=request_id,
+                        account=row_account,
+                        function=function_name,
+                        symbols=chunk,
+                    )
+
+            return {
+                "status": "ok" if not failed else "degraded",
+                "requested": len(rows),
+                "restored": restored,
+                "failed": failed,
+            }
+
     def list_subscribed(
         self,
         account: str | None = None,

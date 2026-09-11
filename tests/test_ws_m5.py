@@ -9,6 +9,11 @@ from stock_broker_tw.main import create_app
 from stock_broker_tw.yuanta.events import EventQueue, YuantaEvent
 
 
+class FakeMarketType:
+    def __str__(self) -> str:
+        return "TWSE"
+
+
 class FakeAdapter:
     def __init__(self) -> None:
         self.event_queue = EventQueue()
@@ -32,7 +37,7 @@ def test_websocket_receives_raw_and_quote_updated() -> None:
                 0,
                 "SubscribeFiveTickA",
                 None,
-                {"key": "TWSE2330", "market_type": "TWSE", "stk_code": "2330"},
+                {"key": "TWSE2330", "market_type": FakeMarketType(), "stk_code": "2330"},
             )
         )
         seen_types = set()

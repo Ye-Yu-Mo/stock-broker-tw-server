@@ -39,6 +39,7 @@ class FakeAdapter:
         self.logout_called = False
         self.close_called = False
         self.dispose_called = False
+        self.subscribe_calls: list[tuple[str, str, list]] = []
 
     def open(self) -> None:
         self.opened = True
@@ -52,6 +53,10 @@ class FakeAdapter:
         self.logged_in = True
         self.last_login_result = login_result_to_dict(FakeLoginResult())
         self.event_queue.put(YuantaEvent(1, 0, "Login", None, FakeLoginResult()))
+        return True
+
+    def subscribe(self, function_name: str, account: str, symbols: list):
+        self.subscribe_calls.append((function_name, account, symbols))
         return True
 
     def logout(self) -> bool:
@@ -118,6 +123,30 @@ def test_login_success_via_api() -> None:
         body = res.json()
         assert body["code"] == 0
         assert body["data"]["login"]["login_list"][0]["account"] == "S98875005091"
+
+
+def test_login_restores_local_quote_subscriptions() -> None:
+    adapter = FakeAdapter()
+    settings = Settings(
+        server=ServerConfig(api_token="test-token"),
+        account=AccountConfig(account="S98875005091", password="1234"),
+    )
+    app = create_app(settings=settings, adapter=adapter)
+    app.state.quote_service.store.save_quote_subscription(
+        "S98875005091", "watchlist", "00635U", "TWSE", index_flag=7
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/session/login", json={}, headers=auth())
+
+    assert response.status_code == 200
+    assert adapter.subscribe_calls == [
+        (
+            "SubscribeWatchlist",
+            "S98875005091",
+            [{"market_type": "TWSE", "stk_code": "00635U", "index_flag": 7}],
+        )
+    ]
 
 
 def test_logout_via_api() -> None:
