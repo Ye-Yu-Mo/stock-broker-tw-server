@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from stock_broker_tw.audit import AuditLogger
@@ -10,6 +11,89 @@ from stock_broker_tw.service.query import QueryService
 from stock_broker_tw.state.store import StateStore
 
 logger = logging.getLogger(__name__)
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
+_FINAL_M4_STATUSES = {"FILLED", "CANCELLED", "REJECTED", "FAILED"}
+_RESERVATION_KEYS = ("reservation", "is_reservation", "reserved", "session", "Session")
+_STOCK_ORDER_CONDS = {"", "0", "3", "4", "ROD", "IOC", "FOK"}
+_STOCK_TIME_IN_FORCE = {"ROD", "IOC", "FOK", "0", "3", "4"}
+
+
+def _parse_trade_date(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, dict):
+        try:
+            year = value.get("year", value.get("Year"))
+            month = value.get("month", value.get("Month"))
+            day = value.get("day", value.get("Day"))
+            if year is not None and month is not None and day is not None:
+                return date(int(year), int(month), int(day))
+        except (TypeError, ValueError):
+            return None
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10].replace("/", "-"))
+    except ValueError:
+        return None
+
+
+def _is_truthy_reservation(value: Any) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "reserved", "reservation", "預約", "预约"}
+
+
+def _is_expired_non_reservation(order: dict[str, Any]) -> bool:
+    trade_day = _parse_trade_date(order.get("trade_date"))
+    if trade_day is None or trade_day >= datetime.now(_TAIPEI_TZ).date():
+        return False
+
+    request = order.get("request") or {}
+    data = order.get("data") or {}
+    sources = [source for source in (request, data) if isinstance(source, dict)]
+    for source in sources:
+        if any(_is_truthy_reservation(source.get(key)) for key in _RESERVATION_KEYS if key in source):
+            return False
+        if any(str(source.get(key)).strip() == "5" for key in ("order_status", "OrderStatus", "last_order_status", "LastOrderStatus") if key in source):
+            return False
+
+    evidence = False
+    for source in sources:
+        for key in ("order_cond", "OrderCond"):
+            if key in source:
+                condition = str(source[key]).strip().upper()
+                if condition not in _STOCK_ORDER_CONDS:
+                    return False
+                evidence = True
+        for key in ("time_in_force", "Time_in_force", "timeInForce"):
+            if key in source:
+                if str(source[key]).strip().upper() not in _STOCK_TIME_IN_FORCE:
+                    return False
+                evidence = True
+    return evidence
+
+
+def _expire_non_reservation_order(store: StateStore, order: dict[str, Any]) -> None:
+    data = dict(order.get("data") or {})
+    data.update(
+        {
+            "need_manual_review": False,
+            "execution_uncertain": False,
+            "retryable": False,
+            "recovery_reason": "expired_non_reservation_order",
+            "expired_trade_date": order.get("trade_date"),
+        }
+    )
+    store.update_stock_order(
+        order["client_order_id"],
+        status="FAILED",
+        order_no=order.get("order_no"),
+        trade_date=order.get("trade_date"),
+        data=data,
+    )
 
 
 async def run_startup_recovery(
@@ -60,6 +144,7 @@ async def run_startup_recovery(
                 "reconciled": True,
                 "unresolved_orders": 0,
                 "unresolved_stock_orders": 0,
+                "expired_orders": 0,
             }
 
         # Mock orders never go through the broker reconciliation path.  A
@@ -89,16 +174,27 @@ async def run_startup_recovery(
         # M4 order row.  If no mapping is available (or the report still says
         # submitted), mark the row for manual review.  A concrete final or
         # accepted status from the broker is considered resolved.
+        expired_orders = 0
         for order in store.get_unfinished_stock_orders():
             mapped = _reconcile_stock_order_from_legacy(store, order)
+            current = store.get_stock_order(order["client_order_id"]) or order
+            if current.get("status") not in _FINAL_M4_STATUSES and _is_expired_non_reservation(current):
+                _expire_non_reservation_order(store, current)
+                expired_orders += 1
+                logger.info(
+                    "startup recovery: expired non-reservation order client_order_id=%s trade_date=%s",
+                    current["client_order_id"],
+                    current.get("trade_date"),
+                )
+                continue
             if mapped is None or mapped in {"PENDING", "SUBMITTED", "NEED_MANUAL_REVIEW"}:
-                data = dict(order.get("data") or {})
+                data = dict(current.get("data") or {})
                 data["need_manual_review"] = True
                 store.update_stock_order(
-                    order["client_order_id"],
+                    current["client_order_id"],
                     status="NEED_MANUAL_REVIEW",
-                    order_no=order.get("order_no"),
-                    trade_date=order.get("trade_date"),
+                    order_no=current.get("order_no"),
+                    trade_date=current.get("trade_date"),
                     data=data,
                 )
 
@@ -120,6 +216,7 @@ async def run_startup_recovery(
             "reconciled": unfinished_after == 0 and len(all_unresolved) == 0,
             "unresolved_orders": unresolved_orders,
             "unresolved_stock_orders": unresolved_stock_orders,
+            "expired_orders": expired_orders,
         }
         logger.info(
             "startup recovery: finished, %s unfinished before, %s unresolved after",

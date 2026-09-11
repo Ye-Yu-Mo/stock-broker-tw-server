@@ -323,3 +323,59 @@ def test_recovery_matches_transformed_broker_basket_by_order_fields(tmp_path: Pa
     row = store.get_stock_order("TRANSFORMED-BASKET")
     assert row["status"] == "ACCEPTED"
     assert row["order_no"] == "H00005"
+
+
+def test_recovery_expires_old_non_reservation_order(tmp_path: Path) -> None:
+    store, adapter, service = make_env(tmp_path)
+    store.save_stock_order(
+        client_order_id="OLD-ROD",
+        request={
+            "client_order_id": "OLD-ROD",
+            "action": "new",
+            "account": "S98875005091",
+            "stk_code": "2330",
+            "time_in_force": "ROD",
+        },
+        status="ACCEPTED",
+        account="S98875005091",
+        action="new",
+        order_no="OLD001",
+        trade_date="2020/01/01",
+    )
+
+    result = run(run_startup_recovery(store, service, adapter))
+
+    row = store.get_stock_order("OLD-ROD")
+    assert result["expired_orders"] == 1
+    assert result["unfinished_after"] == 0
+    assert row["status"] == "FAILED"
+    assert row["data"]["recovery_reason"] == "expired_non_reservation_order"
+    assert row["data"]["execution_uncertain"] is False
+    assert row["data"]["need_manual_review"] is False
+
+
+def test_recovery_keeps_explicit_reservation_for_manual_review(tmp_path: Path) -> None:
+    store, adapter, service = make_env(tmp_path)
+    store.save_stock_order(
+        client_order_id="OLD-RESERVED",
+        request={
+            "client_order_id": "OLD-RESERVED",
+            "action": "new",
+            "account": "S98875005091",
+            "stk_code": "2330",
+            "time_in_force": "ROD",
+        },
+        status="ACCEPTED",
+        account="S98875005091",
+        action="new",
+        order_no="OLD002",
+        trade_date="2020/01/01",
+        data={"order_status": 5},
+    )
+
+    result = run(run_startup_recovery(store, service, adapter))
+
+    row = store.get_stock_order("OLD-RESERVED")
+    assert result["expired_orders"] == 0
+    assert row["status"] == "NEED_MANUAL_REVIEW"
+    assert row["data"]["need_manual_review"] is True
